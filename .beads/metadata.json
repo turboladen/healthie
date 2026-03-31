@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "apple_health_data",
+  "project_id": "1db68e1b-10d1-40ce-aaca-3fb689273f1a"
+}
