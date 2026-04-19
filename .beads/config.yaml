@@ -52,7 +52,5 @@
 # - linear.api-key
 # - github.org
 # - github.repo
-sync.git-remote: "ssh://git@github.com/turboladen/healthie.git"
 
-dolt:
-  port: 64107
+sync.remote: "git+ssh://git@github.com/turboladen/healthie.git"
