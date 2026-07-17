@@ -1,3 +1,5 @@
+use chrono::NaiveDate;
+
 #[derive(Debug)]
 pub struct NewGoal {
     pub concern_id: Option<i32>,
@@ -8,6 +10,5 @@ pub struct NewGoal {
     pub comparison: Option<String>,
     pub target_value: Option<f64>,
     pub target_high: Option<f64>,
-    /// YYYY-MM-DD
-    pub target_date: Option<String>,
+    pub target_date: Option<NaiveDate>,
 }

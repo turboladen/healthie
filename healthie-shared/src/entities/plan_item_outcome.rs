@@ -9,9 +9,9 @@ pub struct Model {
     pub plan_item_id: i32,
     pub status: String,
     pub note: Option<String>,
-    pub recorded_at: String,
-    pub created_at: String,
-    pub updated_at: String,
+    pub recorded_at: DateTimeUtc,
+    pub created_at: DateTimeUtc,
+    pub updated_at: DateTimeUtc,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -1,7 +1,7 @@
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, EntityTrait};
 
 use crate::{
-    clock::now_str,
+    clock::now,
     entities::profile,
     error::{DomainError, DomainResult},
     inputs::profile::UpdateProfile,
@@ -25,11 +25,6 @@ pub async fn upsert(
             VALID_SEXES.join(", ")
         )));
     }
-    if let Some(Some(dob)) = &input.date_of_birth
-        && chrono::NaiveDate::parse_from_str(dob, "%Y-%m-%d").is_err()
-    {
-        return Err(DomainError::invalid("date_of_birth", "must be YYYY-MM-DD"));
-    }
 
     // Branch insert/update explicitly. Do NOT use `.save()`: with the PK Set(1) it
     // always takes the UPDATE path, which fails (RecordNotUpdated) on first call.
@@ -39,7 +34,7 @@ pub async fn upsert(
         Some(m) => m.into(),
         None => profile::ActiveModel {
             id: Set(1),
-            created_at: Set(now_str()),
+            created_at: Set(now()),
             ..Default::default()
         },
     };
@@ -55,7 +50,7 @@ pub async fn upsert(
     if let Some(v) = input.notes {
         active.notes = Set(v);
     }
-    active.updated_at = Set(now_str());
+    active.updated_at = Set(now());
     if is_insert {
         Ok(active.insert(db).await?)
     } else {
@@ -66,7 +61,7 @@ pub async fn upsert(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_db;
+    use crate::test_support::{date, test_db};
 
     #[tokio::test]
     async fn get_returns_none_before_first_upsert() {
@@ -80,7 +75,7 @@ mod tests {
         let p = upsert(
             &db,
             UpdateProfile {
-                date_of_birth: Some(Some("1981-03-02".into())),
+                date_of_birth: Some(Some(date("1981-03-02"))),
                 sex: Some(Some("male".into())),
                 ..Default::default()
             },
@@ -98,12 +93,12 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(p2.id, 1);
-        assert_eq!(p2.date_of_birth.as_deref(), Some("1981-03-02")); // preserved
+        assert_eq!(p2.date_of_birth, Some(date("1981-03-02"))); // preserved
         assert_eq!(p2.height_cm, Some(180));
     }
 
     #[tokio::test]
-    async fn upsert_rejects_bad_sex_and_bad_dob() {
+    async fn upsert_rejects_bad_sex() {
         let db = test_db().await;
         assert!(matches!(
             upsert(
@@ -115,17 +110,6 @@ mod tests {
             )
             .await,
             Err(DomainError::BadRequest(_))
-        ));
-        assert!(matches!(
-            upsert(
-                &db,
-                UpdateProfile {
-                    date_of_birth: Some(Some("03/02/1981".into())),
-                    ..Default::default()
-                }
-            )
-            .await,
-            Err(DomainError::Invalid { .. })
         ));
     }
 }

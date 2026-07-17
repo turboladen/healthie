@@ -9,10 +9,10 @@ pub struct Model {
     pub name: String,
     pub status: String,
     pub narrative: Option<String>,
-    pub opened_on: String,
-    pub resolved_on: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
+    pub opened_on: Date,
+    pub resolved_on: Option<Date>,
+    pub created_at: DateTimeUtc,
+    pub updated_at: DateTimeUtc,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

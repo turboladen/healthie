@@ -10,8 +10,8 @@ pub struct Model {
     pub question: String,
     pub answer: String,
     pub concern_id: Option<i32>,
-    pub created_at: String,
-    pub updated_at: String,
+    pub created_at: DateTimeUtc,
+    pub updated_at: DateTimeUtc,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

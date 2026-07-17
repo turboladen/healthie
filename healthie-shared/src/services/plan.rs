@@ -5,7 +5,7 @@ use sea_orm::{
 use serde::Serialize;
 
 use crate::{
-    clock::{now_str, today_str},
+    clock::{now, today},
     entities::{plan, plan_item, plan_item_outcome},
     error::{DomainError, DomainResult},
     inputs::plan::NewPlan,
@@ -56,12 +56,12 @@ pub async fn commit<C: ConnectionTrait + TransactionTrait>(
     let txn = db.begin().await?;
     let plan_model = plan::ActiveModel {
         checkin_id: Set(input.checkin_id),
-        starts_on: Set(input.starts_on.unwrap_or_else(today_str)),
+        starts_on: Set(input.starts_on.unwrap_or_else(today)),
         horizon_days: Set(input.horizon_days.unwrap_or(7)),
         guidance: Set(input.guidance),
         nutrition: Set(input.nutrition),
-        created_at: Set(now_str()),
-        updated_at: Set(now_str()),
+        created_at: Set(now()),
+        updated_at: Set(now()),
         ..Default::default()
     }
     .insert(&txn)
@@ -74,8 +74,8 @@ pub async fn commit<C: ConnectionTrait + TransactionTrait>(
             title: Set(item.title),
             detail: Set(item.detail),
             scheduled_for: Set(item.scheduled_for),
-            created_at: Set(now_str()),
-            updated_at: Set(now_str()),
+            created_at: Set(now()),
+            updated_at: Set(now()),
             ..Default::default()
         }
         .insert(&txn)
@@ -122,9 +122,9 @@ pub async fn record_item_outcome<C: ConnectionTrait + TransactionTrait>(
         plan_item_id: Set(item.id),
         status: Set(status.to_string()),
         note: Set(note),
-        recorded_at: Set(now_str()),
-        created_at: Set(now_str()),
-        updated_at: Set(now_str()),
+        recorded_at: Set(now()),
+        created_at: Set(now()),
+        updated_at: Set(now()),
         ..Default::default()
     }
     .insert(&txn)
@@ -161,7 +161,10 @@ pub async fn latest(db: &impl ConnectionTrait) -> DomainResult<Option<PlanWithIt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{inputs::plan::NewPlanItem, test_support::test_db};
+    use crate::{
+        inputs::plan::NewPlanItem,
+        test_support::{date, test_db},
+    };
 
     fn pt_plan() -> NewPlan {
         NewPlan {
@@ -175,7 +178,7 @@ mod tests {
                     kind: "workout".into(),
                     title: "PT: bird-dogs 3x10".into(),
                     detail: None,
-                    scheduled_for: Some("2026-07-17".into()),
+                    scheduled_for: Some(date("2026-07-17")),
                 },
                 NewPlanItem {
                     kind: "action".into(),

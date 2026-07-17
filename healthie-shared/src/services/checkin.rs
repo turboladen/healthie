@@ -1,10 +1,11 @@
+use chrono::NaiveTime;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
     QueryOrder,
 };
 
 use crate::{
-    clock::{now_str, today_str},
+    clock::{now, today},
     entities::{checkin, checkin_response},
     error::{DomainError, DomainResult},
     services::concern,
@@ -19,19 +20,19 @@ pub async fn require(db: &impl ConnectionTrait, id: i32) -> DomainResult<checkin
 
 /// Opens today's checkin, or resumes an incomplete one started today.
 pub async fn start(db: &impl ConnectionTrait) -> DomainResult<checkin::Model> {
-    let today = today_str();
+    let day_start = today().and_time(NaiveTime::MIN).and_utc();
     let open = checkin::Entity::find()
         .filter(checkin::Column::CompletedAt.is_null())
-        .filter(checkin::Column::StartedAt.gte(format!("{today} 00:00:00")))
+        .filter(checkin::Column::StartedAt.gte(day_start))
         .one(db)
         .await?;
     if let Some(existing) = open {
         return Ok(existing);
     }
     Ok(checkin::ActiveModel {
-        started_at: Set(now_str()),
-        created_at: Set(now_str()),
-        updated_at: Set(now_str()),
+        started_at: Set(now()),
+        created_at: Set(now()),
+        updated_at: Set(now()),
         ..Default::default()
     }
     .insert(db)
@@ -62,8 +63,8 @@ pub async fn record_response(
         question: Set(question.to_string()),
         answer: Set(answer.to_string()),
         concern_id: Set(concern_id),
-        created_at: Set(now_str()),
-        updated_at: Set(now_str()),
+        created_at: Set(now()),
+        updated_at: Set(now()),
         ..Default::default()
     }
     .insert(db)
@@ -82,9 +83,9 @@ pub async fn complete(
         )));
     }
     let mut active: checkin::ActiveModel = ck.into();
-    active.completed_at = Set(Some(now_str()));
+    active.completed_at = Set(Some(now()));
     active.summary = Set(Some(summary.to_string()));
-    active.updated_at = Set(now_str());
+    active.updated_at = Set(now());
     Ok(active.update(db).await?)
 }
 

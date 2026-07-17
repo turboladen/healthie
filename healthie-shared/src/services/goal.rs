@@ -4,7 +4,7 @@ use sea_orm::{
 };
 
 use crate::{
-    clock::now_str,
+    clock::now,
     entities::goal,
     error::{DomainError, DomainResult},
     inputs::goal::NewGoal,
@@ -67,8 +67,8 @@ pub async fn set(db: &impl ConnectionTrait, input: NewGoal) -> DomainResult<goal
         target_high: Set(input.target_high),
         target_date: Set(input.target_date),
         status: Set("active".into()),
-        created_at: Set(now_str()),
-        updated_at: Set(now_str()),
+        created_at: Set(now()),
+        updated_at: Set(now()),
         ..Default::default()
     }
     .insert(db)
@@ -88,7 +88,7 @@ pub async fn update_status(
     }
     let mut active: goal::ActiveModel = require(db, id).await?.into();
     active.status = Set(status.to_string());
-    active.updated_at = Set(now_str());
+    active.updated_at = Set(now());
     Ok(active.update(db).await?)
 }
 
@@ -103,7 +103,11 @@ pub async fn list_active(db: &impl ConnectionTrait) -> DomainResult<Vec<goal::Mo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{inputs::concern::NewConcern, services::concern, test_support::test_db};
+    use crate::{
+        inputs::concern::NewConcern,
+        services::concern,
+        test_support::{date, test_db},
+    };
 
     #[tokio::test]
     async fn set_creates_metric_goal_under_concern() {
@@ -129,7 +133,7 @@ mod tests {
                 comparison: Some("at-most".into()),
                 target_value: Some(175.0),
                 target_high: None,
-                target_date: Some("2026-12-31".into()),
+                target_date: Some(date("2026-12-31")),
             },
         )
         .await

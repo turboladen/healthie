@@ -13,10 +13,10 @@ pub struct Model {
     pub comparison: Option<String>,
     pub target_value: Option<f64>,
     pub target_high: Option<f64>,
-    pub target_date: Option<String>,
+    pub target_date: Option<Date>,
     pub status: String,
-    pub created_at: String,
-    pub updated_at: String,
+    pub created_at: DateTimeUtc,
+    pub updated_at: DateTimeUtc,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

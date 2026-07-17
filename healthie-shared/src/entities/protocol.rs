@@ -12,13 +12,13 @@ pub struct Model {
     pub kind: String,
     pub purpose: Option<String>,
     pub schedule: Option<String>,
-    pub started_on: String,
-    pub ended_on: Option<String>,
-    pub review_by: Option<String>,
+    pub started_on: Date,
+    pub ended_on: Option<Date>,
+    pub review_by: Option<Date>,
     pub verdict: Option<String>,
     pub verdict_rationale: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
+    pub created_at: DateTimeUtc,
+    pub updated_at: DateTimeUtc,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

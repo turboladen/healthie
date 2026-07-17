@@ -1,10 +1,11 @@
+use chrono::{DateTime, Utc};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
     QueryOrder,
 };
 
 use crate::{
-    clock::now_str,
+    clock::now,
     entities::observation,
     error::{DomainError, DomainResult},
     inputs::observation::NewObservation,
@@ -45,15 +46,15 @@ pub async fn log(
     }
     let reviewed = i32::from(input.origin == "self");
     Ok(observation::ActiveModel {
-        occurred_at: Set(input.occurred_at.unwrap_or_else(now_str)),
+        occurred_at: Set(input.occurred_at.unwrap_or_else(now)),
         origin: Set(input.origin),
         kind: Set(input.kind),
         body: Set(input.body),
         severity: Set(input.severity),
         concern_id: Set(input.concern_id),
         reviewed: Set(reviewed),
-        created_at: Set(now_str()),
-        updated_at: Set(now_str()),
+        created_at: Set(now()),
+        updated_at: Set(now()),
         ..Default::default()
     }
     .insert(db)
@@ -75,13 +76,13 @@ pub async fn mark_reviewed(db: &impl ConnectionTrait, id: i32) -> DomainResult<o
         .ok_or_else(|| DomainError::NotFound(format!("Observation {id} not found")))?;
     let mut active: observation::ActiveModel = existing.into();
     active.reviewed = Set(1);
-    active.updated_at = Set(now_str());
+    active.updated_at = Set(now());
     Ok(active.update(db).await?)
 }
 
 pub async fn recent(
     db: &impl ConnectionTrait,
-    since: &str,
+    since: DateTime<Utc>,
 ) -> DomainResult<Vec<observation::Model>> {
     Ok(observation::Entity::find()
         .filter(observation::Column::OccurredAt.gte(since))
@@ -93,7 +94,7 @@ pub async fn recent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_db;
+    use crate::test_support::{datetime, test_db};
 
     fn spasm(origin: &str) -> NewObservation {
         NewObservation {
@@ -155,9 +156,15 @@ mod tests {
     async fn recent_filters_by_date() {
         let db = test_db().await;
         let mut old = spasm("self");
-        old.occurred_at = Some("2026-01-01 08:00:00".into());
+        old.occurred_at = Some(datetime("2026-01-01 08:00:00"));
         log(&db, old).await.unwrap();
         log(&db, spasm("self")).await.unwrap(); // now
-        assert_eq!(recent(&db, "2026-06-01").await.unwrap().len(), 1);
+        assert_eq!(
+            recent(&db, datetime("2026-06-01 00:00:00"))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

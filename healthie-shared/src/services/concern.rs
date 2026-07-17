@@ -7,7 +7,7 @@ use sea_orm::{
 use serde::Serialize;
 
 use crate::{
-    clock::{now_str, today_str},
+    clock::{now, today},
     entities::{concern, concern_tag},
     error::{DomainError, DomainResult},
     inputs::concern::NewConcern,
@@ -76,9 +76,9 @@ pub async fn open<C: ConnectionTrait + TransactionTrait>(
         name: Set(input.name),
         status: Set("active".into()),
         narrative: Set(input.narrative),
-        opened_on: Set(input.opened_on.unwrap_or_else(today_str)),
-        created_at: Set(now_str()),
-        updated_at: Set(now_str()),
+        opened_on: Set(input.opened_on.unwrap_or_else(today)),
+        created_at: Set(now()),
+        updated_at: Set(now()),
         ..Default::default()
     }
     .insert(&txn)
@@ -87,8 +87,8 @@ pub async fn open<C: ConnectionTrait + TransactionTrait>(
         concern_tag::ActiveModel {
             concern_id: Set(model.id),
             tag: Set(tag.clone()),
-            created_at: Set(now_str()),
-            updated_at: Set(now_str()),
+            created_at: Set(now()),
+            updated_at: Set(now()),
             ..Default::default()
         }
         .insert(&txn)
@@ -119,7 +119,7 @@ pub async fn update_status(
         if !narrative.is_empty() {
             narrative.push('\n');
         }
-        let _ = write!(narrative, "[{}] {note}", today_str());
+        let _ = write!(narrative, "[{}] {note}", today());
     }
     let mut active: concern::ActiveModel = existing.into();
     active.status = Set(status.to_string());
@@ -129,11 +129,11 @@ pub async fn update_status(
         Some(narrative)
     });
     active.resolved_on = Set(if status == "resolved" {
-        Some(today_str())
+        Some(today())
     } else {
         None
     });
-    active.updated_at = Set(now_str());
+    active.updated_at = Set(now());
     Ok(active.update(db).await?)
 }
 

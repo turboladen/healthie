@@ -4,7 +4,7 @@ use sea_orm::{
 };
 
 use crate::{
-    clock::{now_str, today_str},
+    clock::{now, today},
     entities::protocol,
     error::{DomainError, DomainResult},
     inputs::protocol::{NewProtocol, ProtocolOutcome},
@@ -52,10 +52,10 @@ pub async fn start(db: &impl ConnectionTrait, input: NewProtocol) -> DomainResul
         kind: Set(input.kind),
         purpose: Set(input.purpose),
         schedule: Set(input.schedule),
-        started_on: Set(input.started_on.unwrap_or_else(today_str)),
+        started_on: Set(input.started_on.unwrap_or_else(today)),
         review_by: Set(input.review_by),
-        created_at: Set(now_str()),
-        updated_at: Set(now_str()),
+        created_at: Set(now()),
+        updated_at: Set(now()),
         ..Default::default()
     }
     .insert(db)
@@ -90,8 +90,8 @@ pub async fn record_outcome(
     let mut active: protocol::ActiveModel = existing.into();
     active.verdict = Set(Some(outcome.verdict));
     active.verdict_rationale = Set(Some(outcome.rationale));
-    active.ended_on = Set(Some(outcome.ended_on.unwrap_or_else(today_str)));
-    active.updated_at = Set(now_str());
+    active.ended_on = Set(Some(outcome.ended_on.unwrap_or_else(today)));
+    active.updated_at = Set(now());
     Ok(active.update(db).await?)
 }
 
@@ -114,7 +114,7 @@ pub async fn history(db: &impl ConnectionTrait) -> DomainResult<Vec<protocol::Mo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_db;
+    use crate::test_support::{date, test_db};
 
     async fn keto(db: &sea_orm::DatabaseConnection) -> protocol::Model {
         start(
@@ -126,7 +126,7 @@ mod tests {
                 kind: "diet".into(),
                 purpose: Some("lose weight".into()),
                 schedule: None,
-                started_on: Some("2026-05-01".into()),
+                started_on: Some(date("2026-05-01")),
                 review_by: None,
             },
         )
