@@ -11,6 +11,11 @@ use crate::{
     services::{concern, goal},
 };
 
+/// Loads a protocol by id.
+///
+/// # Errors
+/// `DomainError::NotFound` if no protocol has id `id`; `DomainError::Db` on
+/// database failure.
 pub async fn require(db: &impl ConnectionTrait, id: i32) -> DomainResult<protocol::Model> {
     protocol::Entity::find_by_id(id)
         .one(db)
@@ -18,6 +23,12 @@ pub async fn require(db: &impl ConnectionTrait, id: i32) -> DomainResult<protoco
         .ok_or_else(|| DomainError::NotFound(format!("Protocol {id} not found")))
 }
 
+/// Starts a protocol, optionally linked to a concern and/or goal.
+///
+/// # Errors
+/// `DomainError::Invalid` if `name` is empty; `DomainError::NotFound` if
+/// `concern_id` or `goal_id` refers to no such record; `DomainError::Db` on
+/// database failure.
 pub async fn start(db: &impl ConnectionTrait, input: NewProtocol) -> DomainResult<protocol::Model> {
     if input.name.trim().is_empty() {
         return Err(DomainError::invalid("name", "must not be empty"));
@@ -45,6 +56,12 @@ pub async fn start(db: &impl ConnectionTrait, input: NewProtocol) -> DomainResul
     .await?)
 }
 
+/// Records a protocol's final verdict, ending it.
+///
+/// # Errors
+/// `DomainError::Invalid` if `rationale` is empty; `DomainError::NotFound` if no
+/// protocol has id `id`; `DomainError::BadRequest` if the protocol already has a
+/// verdict; `DomainError::Db` on database failure.
 pub async fn record_outcome(
     db: &impl ConnectionTrait,
     id: i32,
@@ -71,6 +88,10 @@ pub async fn record_outcome(
     Ok(active.update(db).await?)
 }
 
+/// Lists protocols that have not yet ended.
+///
+/// # Errors
+/// `DomainError::Db` on database failure.
 pub async fn list_active(db: &impl ConnectionTrait) -> DomainResult<Vec<protocol::Model>> {
     Ok(protocol::Entity::find()
         .filter(protocol::Column::EndedOn.is_null())
@@ -79,6 +100,10 @@ pub async fn list_active(db: &impl ConnectionTrait) -> DomainResult<Vec<protocol
         .await?)
 }
 
+/// Lists every protocol, most recently started first.
+///
+/// # Errors
+/// `DomainError::Db` on database failure.
 pub async fn history(db: &impl ConnectionTrait) -> DomainResult<Vec<protocol::Model>> {
     Ok(protocol::Entity::find()
         .order_by_desc(protocol::Column::StartedOn)

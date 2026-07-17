@@ -11,6 +11,11 @@ use crate::{
     services::concern,
 };
 
+/// Loads a goal by id.
+///
+/// # Errors
+/// `DomainError::NotFound` if no goal has id `id`; `DomainError::Db` on database
+/// failure.
 pub async fn require(db: &impl ConnectionTrait, id: i32) -> DomainResult<goal::Model> {
     goal::Entity::find_by_id(id)
         .one(db)
@@ -18,6 +23,13 @@ pub async fn require(db: &impl ConnectionTrait, id: i32) -> DomainResult<goal::M
         .ok_or_else(|| DomainError::NotFound(format!("Goal {id} not found")))
 }
 
+/// Creates a goal, optionally under a concern.
+///
+/// # Errors
+/// `DomainError::Invalid` if `title` is empty, or if `comparison` is set without
+/// a `target_value`, or a `range` comparison lacks/inverts `target_high`;
+/// `DomainError::NotFound` if `concern_id` refers to no concern;
+/// `DomainError::Db` on database failure.
 pub async fn set(db: &impl ConnectionTrait, input: NewGoal) -> DomainResult<goal::Model> {
     if input.title.trim().is_empty() {
         return Err(DomainError::invalid("title", "must not be empty"));
@@ -66,6 +78,11 @@ pub async fn set(db: &impl ConnectionTrait, input: NewGoal) -> DomainResult<goal
     .await?)
 }
 
+/// Sets a goal's status.
+///
+/// # Errors
+/// `DomainError::NotFound` if no goal has id `id`; `DomainError::Db` on database
+/// failure.
 pub async fn update_status(
     db: &impl ConnectionTrait,
     id: i32,
@@ -77,6 +94,10 @@ pub async fn update_status(
     Ok(active.update(db).await?)
 }
 
+/// Lists every active goal.
+///
+/// # Errors
+/// `DomainError::Db` on database failure.
 pub async fn list_active(db: &impl ConnectionTrait) -> DomainResult<Vec<goal::Model>> {
     Ok(goal::Entity::find()
         .filter(goal::Column::Status.eq(GoalStatus::Active))

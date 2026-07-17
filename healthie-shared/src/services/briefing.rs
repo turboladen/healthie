@@ -39,6 +39,10 @@ pub struct Briefing {
     pub recent_observations: Vec<observation::Model>,
 }
 
+/// Assembles the full daily briefing as of `today`.
+///
+/// # Errors
+/// `DomainError::Db` on database failure in any of the underlying queries.
 pub async fn assemble(db: &impl ConnectionTrait, today: NaiveDate) -> DomainResult<Briefing> {
     let last = checkin::latest_completed(db).await?;
     let (last_checkin, days_since, since_window) = if let Some((ck, responses)) = last {

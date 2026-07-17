@@ -2,10 +2,18 @@ use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, EntityTrait};
 
 use crate::{clock::now, entities::profile, error::DomainResult, inputs::profile::UpdateProfile};
 
+/// Returns the singleton profile row, if it exists.
+///
+/// # Errors
+/// `DomainError::Db` on database failure.
 pub async fn get(db: &impl ConnectionTrait) -> DomainResult<Option<profile::Model>> {
     Ok(profile::Entity::find_by_id(1).one(db).await?)
 }
 
+/// Creates or partially updates the singleton profile row.
+///
+/// # Errors
+/// `DomainError::Db` on database failure.
 pub async fn upsert(
     db: &impl ConnectionTrait,
     input: UpdateProfile,

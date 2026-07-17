@@ -27,6 +27,12 @@ pub struct PlanWithItems {
     pub items: Vec<ItemWithOutcome>,
 }
 
+/// Commits a plan and its items in one transaction.
+///
+/// # Errors
+/// `DomainError::Invalid` if the plan has no items or any item title is empty;
+/// `DomainError::NotFound` if `checkin_id` refers to no checkin;
+/// `DomainError::Db` on database failure.
 pub async fn commit<C: ConnectionTrait + TransactionTrait>(
     db: &C,
     input: NewPlan,
@@ -85,6 +91,11 @@ pub async fn commit<C: ConnectionTrait + TransactionTrait>(
     })
 }
 
+/// Records (replacing any prior) the outcome for a plan item.
+///
+/// # Errors
+/// `DomainError::NotFound` if no plan item has id `item_id`; `DomainError::Db`
+/// on database failure.
 pub async fn record_item_outcome<C: ConnectionTrait + TransactionTrait>(
     db: &C,
     item_id: i32,
@@ -120,6 +131,10 @@ pub async fn record_item_outcome<C: ConnectionTrait + TransactionTrait>(
     Ok(outcome)
 }
 
+/// Returns the most recent plan with its items and their outcomes, if any.
+///
+/// # Errors
+/// `DomainError::Db` on database failure.
 pub async fn latest(db: &impl ConnectionTrait) -> DomainResult<Option<PlanWithItems>> {
     let Some(p) = plan::Entity::find()
         .order_by_desc(plan::Column::StartsOn)

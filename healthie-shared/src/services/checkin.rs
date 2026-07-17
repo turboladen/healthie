@@ -11,6 +11,11 @@ use crate::{
     services::concern,
 };
 
+/// Loads a checkin by id.
+///
+/// # Errors
+/// `DomainError::NotFound` if no checkin has id `id`; `DomainError::Db` on
+/// database failure.
 pub async fn require(db: &impl ConnectionTrait, id: i32) -> DomainResult<checkin::Model> {
     checkin::Entity::find_by_id(id)
         .one(db)
@@ -19,6 +24,9 @@ pub async fn require(db: &impl ConnectionTrait, id: i32) -> DomainResult<checkin
 }
 
 /// Opens today's checkin, or resumes an incomplete one started today.
+///
+/// # Errors
+/// `DomainError::Db` on database failure.
 pub async fn start(db: &impl ConnectionTrait) -> DomainResult<checkin::Model> {
     let day_start = today().and_time(NaiveTime::MIN).and_utc();
     let open = checkin::Entity::find()
@@ -39,6 +47,13 @@ pub async fn start(db: &impl ConnectionTrait) -> DomainResult<checkin::Model> {
     .await?)
 }
 
+/// Appends a question/answer to an open checkin.
+///
+/// # Errors
+/// `DomainError::NotFound` if `checkin_id` or `concern_id` refers to no such
+/// record; `DomainError::BadRequest` if the checkin is already completed;
+/// `DomainError::Invalid` if `answer` is empty; `DomainError::Db` on database
+/// failure.
 pub async fn record_response(
     db: &impl ConnectionTrait,
     checkin_id: i32,
@@ -71,6 +86,12 @@ pub async fn record_response(
     .await?)
 }
 
+/// Completes a checkin with a summary.
+///
+/// # Errors
+/// `DomainError::NotFound` if no checkin has id `checkin_id`;
+/// `DomainError::BadRequest` if it is already completed; `DomainError::Db` on
+/// database failure.
 pub async fn complete(
     db: &impl ConnectionTrait,
     checkin_id: i32,
@@ -89,6 +110,10 @@ pub async fn complete(
     Ok(active.update(db).await?)
 }
 
+/// Returns the most recently completed checkin with its responses, if any.
+///
+/// # Errors
+/// `DomainError::Db` on database failure.
 pub async fn latest_completed(
     db: &impl ConnectionTrait,
 ) -> DomainResult<Option<(checkin::Model, Vec<checkin_response::Model>)>> {

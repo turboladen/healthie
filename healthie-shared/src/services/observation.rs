@@ -12,6 +12,12 @@ use crate::{
     services::concern,
 };
 
+/// Records an observation. `self`-origin rows are auto-marked reviewed.
+///
+/// # Errors
+/// `DomainError::Invalid` if `body` is empty or `severity` is outside 1-10;
+/// `DomainError::NotFound` if `concern_id` refers to no concern;
+/// `DomainError::Db` on database failure.
 pub async fn log(
     db: &impl ConnectionTrait,
     input: NewObservation,
@@ -44,6 +50,10 @@ pub async fn log(
     .await?)
 }
 
+/// Lists observations awaiting review, oldest first.
+///
+/// # Errors
+/// `DomainError::Db` on database failure.
 pub async fn pending_review(db: &impl ConnectionTrait) -> DomainResult<Vec<observation::Model>> {
     Ok(observation::Entity::find()
         .filter(observation::Column::Reviewed.eq(0))
@@ -52,6 +62,11 @@ pub async fn pending_review(db: &impl ConnectionTrait) -> DomainResult<Vec<obser
         .await?)
 }
 
+/// Marks an observation reviewed.
+///
+/// # Errors
+/// `DomainError::NotFound` if no observation has id `id`; `DomainError::Db` on
+/// database failure.
 pub async fn mark_reviewed(db: &impl ConnectionTrait, id: i32) -> DomainResult<observation::Model> {
     let existing = observation::Entity::find_by_id(id)
         .one(db)
@@ -63,6 +78,10 @@ pub async fn mark_reviewed(db: &impl ConnectionTrait, id: i32) -> DomainResult<o
     Ok(active.update(db).await?)
 }
 
+/// Lists observations at or after `since`, most recent first.
+///
+/// # Errors
+/// `DomainError::Db` on database failure.
 pub async fn recent(
     db: &impl ConnectionTrait,
     since: DateTime<Utc>,

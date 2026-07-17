@@ -22,6 +22,11 @@ pub struct ConcernWithTags {
     pub tags: Vec<ConcernTag>,
 }
 
+/// Loads a concern by id.
+///
+/// # Errors
+/// `DomainError::NotFound` if no concern has id `id`; `DomainError::Db` on
+/// database failure.
 pub async fn require(db: &impl ConnectionTrait, id: i32) -> DomainResult<concern::Model> {
     concern::Entity::find_by_id(id)
         .one(db)
@@ -29,6 +34,11 @@ pub async fn require(db: &impl ConnectionTrait, id: i32) -> DomainResult<concern
         .ok_or_else(|| DomainError::NotFound(format!("Concern {id} not found")))
 }
 
+/// Opens a new concern with its (deduplicated) tags in one transaction.
+///
+/// # Errors
+/// `DomainError::Invalid` if `name` is empty; `DomainError::Db` on database
+/// failure.
 pub async fn open<C: ConnectionTrait + TransactionTrait>(
     db: &C,
     input: NewConcern,
@@ -77,6 +87,12 @@ pub async fn open<C: ConnectionTrait + TransactionTrait>(
     })
 }
 
+/// Sets a concern's status, optionally appending a dated note to its narrative.
+/// Resolving stamps `resolved_on`; any other status clears it.
+///
+/// # Errors
+/// `DomainError::NotFound` if no concern has id `id`; `DomainError::Db` on
+/// database failure.
 pub async fn update_status(
     db: &impl ConnectionTrait,
     id: i32,
@@ -107,6 +123,10 @@ pub async fn update_status(
     Ok(active.update(db).await?)
 }
 
+/// Returns a concern's tags in insertion order.
+///
+/// # Errors
+/// `DomainError::Db` on database failure.
 pub async fn tags_for(db: &impl ConnectionTrait, concern_id: i32) -> DomainResult<Vec<ConcernTag>> {
     Ok(concern_tag::Entity::find()
         .filter(concern_tag::Column::ConcernId.eq(concern_id))
@@ -118,6 +138,10 @@ pub async fn tags_for(db: &impl ConnectionTrait, concern_id: i32) -> DomainResul
         .collect())
 }
 
+/// Lists every non-resolved concern with its tags.
+///
+/// # Errors
+/// `DomainError::Db` on database failure.
 pub async fn list_active(db: &impl ConnectionTrait) -> DomainResult<Vec<ConcernWithTags>> {
     let concerns = concern::Entity::find()
         .filter(concern::Column::Status.ne(ConcernStatus::Resolved))

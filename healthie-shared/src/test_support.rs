@@ -8,12 +8,20 @@ use crate::migration::Migrator;
 ///
 /// All datetime writers go through the sqlx `DateTime<Utc>` encoder; this helper
 /// keeps tests on typed values rather than raw strings.
+///
+/// # Panics
+/// Panics if `s` is not a valid `YYYY-MM-DD` date.
+#[must_use]
 pub fn date(s: &str) -> NaiveDate {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").expect("valid YYYY-MM-DD date literal")
 }
 
 /// Parse a `YYYY-MM-DD HH:MM:SS` string into a UTC `DateTime` for test
 /// seeds/asserts.
+///
+/// # Panics
+/// Panics if `s` is not a valid `YYYY-MM-DD HH:MM:SS` datetime.
+#[must_use]
 pub fn datetime(s: &str) -> DateTime<Utc> {
     chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
         .expect("valid YYYY-MM-DD HH:MM:SS datetime literal")
@@ -21,6 +29,9 @@ pub fn datetime(s: &str) -> DateTime<Utc> {
 }
 
 /// In-memory `SQLite`, single pinned connection, fully migrated.
+///
+/// # Panics
+/// Panics if the in-memory database cannot be opened or the migrations fail.
 pub async fn test_db() -> DatabaseConnection {
     let mut opt = ConnectOptions::new("sqlite::memory:");
     opt.max_connections(1)

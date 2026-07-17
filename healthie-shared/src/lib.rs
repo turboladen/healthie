@@ -4,15 +4,11 @@
     clippy::struct_field_names,
     clippy::wildcard_imports
 )]
-// These pedantic lints target public-API surface. The domain library favours terse
-// service signatures over per-fn doc/must_use annotations; allow them crate-wide to keep
-// the `-D clippy::pedantic` gate green, matching the glovebox-shared reference crate.
-#![allow(
-    clippy::missing_errors_doc,
-    clippy::missing_panics_doc,
-    clippy::must_use_candidate,
-    clippy::implicit_hasher
-)]
+// Public service fns document their `# Errors`/`# Panics` explicitly (these
+// become M1b tool-description source material), so those doc lints stay on.
+// `implicit_hasher` targets generic HashMap params we don't expose; keep it
+// allowed crate-wide.
+#![allow(clippy::implicit_hasher)]
 
 pub mod clock;
 pub mod entities;
