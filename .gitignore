@@ -13,3 +13,8 @@ wheels/
 .dolt/
 *.db
 .beads-credential-key
+
+# Rust
+target/
+*.db-shm
+*.db-wal

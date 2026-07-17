@@ -84,6 +84,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["full"] }
 thiserror = "2"
 anyhow = "1"
+async-trait = "0.1"
 tracing = "0.1"
 
 [profile.release]
@@ -139,6 +140,7 @@ test-support = []
 [dependencies]
 sea-orm.workspace = true
 sea-orm-migration.workspace = true
+async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
@@ -300,7 +302,7 @@ impl MigratorTrait for Migrator {
 }
 ```
 
-(Note: `async_trait` is re-exported by `sea_orm_migration::prelude` as `sea_orm_migration::async_trait`; if the plain path fails, use `#[sea_orm_migration::async_trait::async_trait]`.)
+(`async-trait` is a direct workspace dependency — Task 1 declares it, matching glovebox — so the bare `#[async_trait::async_trait]` path resolves.)
 
 `healthie-shared/src/migration/m20260716_000001_initial_schema.rs` — the full M1 schema. Pattern per table shown in full for `profile` and `concerns`; repeat mechanically for the rest using the column lists that follow.
 
@@ -377,6 +379,26 @@ impl MigrationTrait for Migration {
 Remaining tables (implement each in `up()` with the same `pk` + `timestamps` helpers; FK = `ForeignKey::create()` inline via `.foreign_key(ForeignKeyCreateStatement::new() ...)` — copy glovebox's inline style):
 
 - `concern_tags`: `id` pk; `concern_id` integer not_null FK→`concerns.id` ON DELETE CASCADE; `tag` text not_null. Unique index on (`concern_id`,`tag`).
+
+  FKs and indexes are NOT optional — build them with the prelude types, e.g.:
+  ```rust
+  t.foreign_key(
+      ForeignKey::create()
+          .from(Alias::new("concern_tags"), Alias::new("concern_id"))
+          .to(Alias::new("concerns"), Alias::new("id"))
+          .on_delete(ForeignKeyAction::Cascade),
+  );
+  // after create_table:
+  manager.create_index(
+      Index::create()
+          .name("idx_concern_tags_unique")
+          .table(Alias::new("concern_tags"))
+          .col(Alias::new("concern_id"))
+          .col(Alias::new("tag"))
+          .unique()
+          .to_owned(),
+  ).await?;
+  ```
 - `goals`: `id` pk; `concern_id` integer nullable FK→`concerns.id` ON DELETE SET NULL; `title` text not_null; `description` text; `metric_kind` text; `comparison` text; `target_value` real; `target_high` real; `target_date` text; `status` text not_null default `"active"`; timestamps.
 - `protocols`: `id` pk; `concern_id` integer nullable FK→`concerns.id` SET NULL; `goal_id` integer nullable FK→`goals.id` SET NULL; `name` text not_null; `kind` text not_null; `purpose` text; `schedule` text; `started_on` text not_null; `ended_on` text; `review_by` text; `verdict` text; `verdict_rationale` text; timestamps.
 - `observations`: `id` pk; `occurred_at` text not_null; `origin` text not_null; `kind` text not_null default `"note"`; `body` text not_null; `severity` integer; `concern_id` integer nullable FK→`concerns.id` SET NULL; `reviewed` integer not_null default `0`; timestamps.
@@ -481,7 +503,7 @@ Append to `test_support.rs` tests:
 ```
 
 Run: `cargo test -p healthie-shared entities_match_schema`
-Expected: PASS (any column-name typo fails here with a decode error).
+Expected: PASS. (This catches column-NAME typos — bad SQL errors even on empty tables. Type mismatches only surface once rows exist; the service round-trip tests in Tasks 4-11 cover that.)
 
 - [ ] **Step 3: Commit**
 
@@ -602,23 +624,30 @@ pub async fn upsert(db: &impl ConnectionTrait, input: UpdateProfile) -> DomainRe
         }
     }
 
+    // Branch insert/update explicitly. Do NOT use `.save()`: with the PK Set(1) it
+    // always takes the UPDATE path, which fails (RecordNotUpdated) on first call.
     let existing = get(db).await?;
+    let is_insert = existing.is_none();
     let mut active: profile::ActiveModel = match existing {
         Some(m) => m.into(),
-        None => profile::ActiveModel { id: Set(1), ..Default::default() },
+        None => profile::ActiveModel {
+            id: Set(1),
+            created_at: Set(now_str()),
+            ..Default::default()
+        },
     };
     if let Some(v) = input.date_of_birth { active.date_of_birth = Set(v); }
     if let Some(v) = input.sex { active.sex = Set(v); }
     if let Some(v) = input.height_cm { active.height_cm = Set(v); }
     if let Some(v) = input.notes { active.notes = Set(v); }
     active.updated_at = Set(now_str());
-    // insert needs created_at explicitly (ActiveModel bypasses the column default)
-    if active.created_at.is_not_set() { active.created_at = Set(now_str()); }
-    Ok(active.save(db).await?.try_into_model()?)
+    if is_insert {
+        Ok(active.insert(db).await?)
+    } else {
+        Ok(active.update(db).await?)
+    }
 }
 ```
-
-(If `try_into_model` needs it, import `sea_orm::TryIntoModel`.)
 
 `inputs/mod.rs`: `pub mod profile;` — `services/mod.rs`: `pub mod profile;`
 
