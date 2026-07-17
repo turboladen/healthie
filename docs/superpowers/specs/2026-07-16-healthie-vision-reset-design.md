@@ -29,7 +29,7 @@ NotePlan is retired as the weekly memory; healthie replaces it. iCal remains an 
 | Ingestion | Health Auto Export REST automation POSTs daily JSON to `/ingest/hae` on the odroid; HAE's MCP server is the gap-fill fallback. |
 | Goal model | Concern → Goal → Protocol chain (see Domain model). |
 | Whose health | Steve only, full model; family illness as lightweight `FamilyEvent` context, queryable but not per-person modeling. |
-| Plan output | Healthie stores each checkin's Plan as source of truth; Claude pushes copies outward (iCal). |
+| Plan output | Healthie stores each checkin's Plan as source of truth. Plan items are typed, and each kind maps to a natural external destination Claude pushes to at the conversation layer: time-bound items → calendar (iCal), discrete actions → a task system (e.g. Apple Reminders via MCP), guidance/nutrition direction → stays in healthie (SPA + resource). Destinations are pluggable without schema changes. |
 | Build order | Checkin-loop first (see Roadmap). |
 | Checkin cadence | Cadence-agnostic: a checkin covers "since the last checkin." No assumption of weekly. |
 
@@ -51,7 +51,8 @@ NotePlan is retired as the weekly memory; healthie replaces it. iCal remains an 
 5. A **Plan** is committed (`commit_plan`): workouts drawn from the exercise library
    (PT must-dos rotated in by the rules layer), actions (book screening, refill
    magnesium), nutrition direction for the period, guidance summary. Claude pushes
-   workouts to iCal; healthie's copy is canonical.
+   time-bound items to the calendar and actions to a task system; healthie's copy is
+   canonical.
 6. Between checkins, outcomes land via `record_plan_outcome`; the next briefing opens
    with "here's what you committed to — what actually happened?"
 
@@ -138,6 +139,11 @@ Rust edition 2024; single deployable binary → odroid n2+ (dietpi); one SQLite 
 documents on disk under `{DATA_DIR}/files/...`. Business logic in the library, never in
 handlers or tools.
 
+**Dependency policy:** at M1 kickoff, pin the latest stable of everything (axum, SeaORM,
+rmcp, Svelte 5, Vite, Bun, tooling) and verify APIs against current documentation at
+implementation time — not training-data memory — so the project doesn't start life
+needing upgrades.
+
 **`/ingest/hae`**: unattended machine-to-machine write path. Bearer-token auth,
 idempotent upserts keyed on (metric kind, date) so HAE retries are harmless. Curation
 config (which HK metric kinds to keep, at what aggregation) lives in the DB, editable
@@ -189,8 +195,12 @@ between   outcomes ──record_plan_outcome──▶ adherence for next briefin
   quarantine table; idempotent upserts throughout.
 - **Irregular checkins:** the briefing is date-aware; a multi-week gap widens its
   windows and says so. Nothing assumes a fixed cadence.
-- **Odroid unreachable:** HAE queues and re-sends; `get_data_gaps` surfaces holes; the
-  HAE MCP server couriers missing days during a conversation.
+- **Phone away from home at export time:** three layers. (a) Configure HAE to export a
+  rolling multi-day window rather than "today only" — idempotent upserts make the
+  overlap free, so the next successful sync backfills missed days automatically.
+  (b) Optionally put the phone and odroid on Tailscale so home wifi is not a
+  precondition. (c) `get_data_gaps` + the HAE MCP courier path remains the backstop
+  during any conversation.
 - **Dropped conversation mid-checkin:** checkin tools are append-only events, so a
   partial checkin is valid and resumable.
 
@@ -231,6 +241,13 @@ between   outcomes ──record_plan_outcome──▶ adherence for next briefin
 - **Voice quick-entry** in the SPA.
 - **Phase 2 extraction** candidates (MCP scaffolding, document pipeline) per the pattern
   doc, once ≥3 apps share the shape.
+
+## Decision records going forward
+
+Architectural decisions after this spec are tracked as lightweight ADRs under
+`docs/adr/` (one file per decision: context, decision, consequences) so future Steve can
+reconstruct *why*. This spec serves as the founding record; the Decisions log table
+above seeds it.
 
 ## Housekeeping
 
