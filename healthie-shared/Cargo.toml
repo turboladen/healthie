@@ -1,0 +1,24 @@
+[package]
+name = "healthie-shared"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "healthie_shared"
+
+[features]
+test-support = []
+
+[dependencies]
+sea-orm.workspace = true
+sea-orm-migration.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile = "3"
