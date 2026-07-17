@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
-    QueryOrder,
+    QueryOrder, TransactionTrait,
 };
 use serde::Serialize;
 
@@ -52,11 +52,26 @@ pub async fn require(db: &impl ConnectionTrait, id: i32) -> DomainResult<concern
         .ok_or_else(|| DomainError::NotFound(format!("Concern {id} not found")))
 }
 
-pub async fn open(db: &impl ConnectionTrait, input: NewConcern) -> DomainResult<ConcernWithTags> {
+pub async fn open<C: ConnectionTrait + TransactionTrait>(
+    db: &C,
+    input: NewConcern,
+) -> DomainResult<ConcernWithTags> {
     if input.name.trim().is_empty() {
         return Err(DomainError::invalid("name", "must not be empty"));
     }
-    validate_tags(&input.tags)?;
+    // Dedupe order-preserving, first-wins: the (concern_id, tag) unique index
+    // rejects duplicates, so silently collapse them rather than fail the insert.
+    let mut tags: Vec<String> = Vec::new();
+    for tag in input.tags {
+        if !tags.contains(&tag) {
+            tags.push(tag);
+        }
+    }
+    validate_tags(&tags)?;
+
+    // concern + tags are one unit of work: a mid-loop failure must not leave a
+    // persisted concern with only some of its tags.
+    let txn = db.begin().await?;
     let model = concern::ActiveModel {
         name: Set(input.name),
         status: Set("active".into()),
@@ -66,10 +81,9 @@ pub async fn open(db: &impl ConnectionTrait, input: NewConcern) -> DomainResult<
         updated_at: Set(now_str()),
         ..Default::default()
     }
-    .insert(db)
+    .insert(&txn)
     .await?;
-    let mut tags = Vec::new();
-    for tag in input.tags {
+    for tag in &tags {
         concern_tag::ActiveModel {
             concern_id: Set(model.id),
             tag: Set(tag.clone()),
@@ -77,10 +91,10 @@ pub async fn open(db: &impl ConnectionTrait, input: NewConcern) -> DomainResult<
             updated_at: Set(now_str()),
             ..Default::default()
         }
-        .insert(db)
+        .insert(&txn)
         .await?;
-        tags.push(tag);
     }
+    txn.commit().await?;
     Ok(ConcernWithTags {
         concern: model,
         tags,
@@ -173,6 +187,30 @@ mod tests {
         let c = seed(&db).await;
         assert_eq!(c.concern.status, "active");
         assert_eq!(c.tags, vec!["musculoskeletal", "neurological"]);
+    }
+
+    #[tokio::test]
+    async fn open_dedupes_duplicate_tags() {
+        let db = test_db().await;
+        let c = open(
+            &db,
+            NewConcern {
+                name: "Bad back".into(),
+                narrative: None,
+                tags: vec![
+                    "musculoskeletal".into(),
+                    "musculoskeletal".into(),
+                    "neurological".into(),
+                ],
+                opened_on: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(c.tags, vec!["musculoskeletal", "neurological"]);
+        // stored once, not once per duplicate
+        let reloaded = tags_for(&db, c.concern.id).await.unwrap();
+        assert_eq!(reloaded, vec!["musculoskeletal", "neurological"]);
     }
 
     #[tokio::test]

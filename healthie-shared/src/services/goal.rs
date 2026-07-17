@@ -47,6 +47,15 @@ pub async fn set(db: &impl ConnectionTrait, input: NewGoal) -> DomainResult<goal
                 "required when comparison is 'range'",
             ));
         }
+        if cmp == "range"
+            && let (Some(low), Some(high)) = (input.target_value, input.target_high)
+            && low > high
+        {
+            return Err(DomainError::invalid(
+                "target_high",
+                "must be >= target_value",
+            ));
+        }
     }
     Ok(goal::ActiveModel {
         concern_id: Set(input.concern_id),
@@ -180,6 +189,26 @@ mod tests {
         )
         .await;
         assert!(matches!(res, Err(DomainError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn set_rejects_inverted_range() {
+        let db = test_db().await;
+        let res = set(
+            &db,
+            NewGoal {
+                concern_id: None,
+                title: "Sleep 7-8h".into(),
+                description: None,
+                metric_kind: Some("sleep_hours".into()),
+                comparison: Some("range".into()),
+                target_value: Some(8.0),
+                target_high: Some(7.0),
+                target_date: None,
+            },
+        )
+        .await;
+        assert!(matches!(res, Err(DomainError::Invalid { .. })));
     }
 
     #[tokio::test]

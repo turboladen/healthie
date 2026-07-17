@@ -1,6 +1,6 @@
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, ModelTrait,
-    QueryFilter, QueryOrder,
+    QueryFilter, QueryOrder, TransactionTrait,
 };
 use serde::Serialize;
 
@@ -27,7 +27,10 @@ pub struct PlanWithItems {
     pub items: Vec<ItemWithOutcome>,
 }
 
-pub async fn commit(db: &impl ConnectionTrait, input: NewPlan) -> DomainResult<PlanWithItems> {
+pub async fn commit<C: ConnectionTrait + TransactionTrait>(
+    db: &C,
+    input: NewPlan,
+) -> DomainResult<PlanWithItems> {
     if input.items.is_empty() {
         return Err(DomainError::invalid(
             "items",
@@ -49,6 +52,8 @@ pub async fn commit(db: &impl ConnectionTrait, input: NewPlan) -> DomainResult<P
     if let Some(cid) = input.checkin_id {
         checkin::require(db, cid).await?;
     }
+    // plan + its items are one unit of work.
+    let txn = db.begin().await?;
     let plan_model = plan::ActiveModel {
         checkin_id: Set(input.checkin_id),
         starts_on: Set(input.starts_on.unwrap_or_else(today_str)),
@@ -59,7 +64,7 @@ pub async fn commit(db: &impl ConnectionTrait, input: NewPlan) -> DomainResult<P
         updated_at: Set(now_str()),
         ..Default::default()
     }
-    .insert(db)
+    .insert(&txn)
     .await?;
     let mut items = Vec::with_capacity(input.items.len());
     for item in input.items {
@@ -73,21 +78,22 @@ pub async fn commit(db: &impl ConnectionTrait, input: NewPlan) -> DomainResult<P
             updated_at: Set(now_str()),
             ..Default::default()
         }
-        .insert(db)
+        .insert(&txn)
         .await?;
         items.push(ItemWithOutcome {
             item: m,
             outcome: None,
         });
     }
+    txn.commit().await?;
     Ok(PlanWithItems {
         plan: plan_model,
         items,
     })
 }
 
-pub async fn record_item_outcome(
-    db: &impl ConnectionTrait,
+pub async fn record_item_outcome<C: ConnectionTrait + TransactionTrait>(
+    db: &C,
     item_id: i32,
     status: &str,
     note: Option<String>,
@@ -102,15 +108,17 @@ pub async fn record_item_outcome(
         .one(db)
         .await?
         .ok_or_else(|| DomainError::NotFound(format!("Plan item {item_id} not found")))?;
-    // one outcome per item: replace any existing
+    // one outcome per item: the delete-then-insert replace is one unit of work,
+    // so a failed insert can't leave the item with no outcome at all.
+    let txn = db.begin().await?;
     if let Some(existing) = plan_item_outcome::Entity::find()
         .filter(plan_item_outcome::Column::PlanItemId.eq(item.id))
-        .one(db)
+        .one(&txn)
         .await?
     {
-        existing.delete(db).await?;
+        existing.delete(&txn).await?;
     }
-    Ok(plan_item_outcome::ActiveModel {
+    let outcome = plan_item_outcome::ActiveModel {
         plan_item_id: Set(item.id),
         status: Set(status.to_string()),
         note: Set(note),
@@ -119,8 +127,10 @@ pub async fn record_item_outcome(
         updated_at: Set(now_str()),
         ..Default::default()
     }
-    .insert(db)
-    .await?)
+    .insert(&txn)
+    .await?;
+    txn.commit().await?;
+    Ok(outcome)
 }
 
 pub async fn latest(db: &impl ConnectionTrait) -> DomainResult<Option<PlanWithItems>> {

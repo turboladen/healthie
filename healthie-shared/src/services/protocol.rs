@@ -106,6 +106,7 @@ pub async fn list_active(db: &impl ConnectionTrait) -> DomainResult<Vec<protocol
 pub async fn history(db: &impl ConnectionTrait) -> DomainResult<Vec<protocol::Model>> {
     Ok(protocol::Entity::find()
         .order_by_desc(protocol::Column::StartedOn)
+        .order_by_desc(protocol::Column::Id)
         .all(db)
         .await?)
 }

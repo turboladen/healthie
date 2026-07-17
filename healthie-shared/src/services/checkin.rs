@@ -94,6 +94,7 @@ pub async fn latest_completed(
     let latest = checkin::Entity::find()
         .filter(checkin::Column::CompletedAt.is_not_null())
         .order_by_desc(checkin::Column::CompletedAt)
+        .order_by_desc(checkin::Column::Id)
         .one(db)
         .await?;
     let Some(ck) = latest else {
