@@ -52,18 +52,36 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+just ci        # full gate: build + test + clippy (workspace, --locked)
+just fmt       # cargo +nightly fmt (nightly required for rustfmt.toml options)
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings -D clippy::pedantic  # hard gate
 ```
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+Personal health system-of-record per `../personal-domain-pattern` (vision:
+`docs/superpowers/specs/2026-07-16-healthie-vision-reset-design.md`, being distilled
+into `docs/adr/`). Cargo workspace: `healthie-shared` (SeaORM/SQLite domain lib —
+entities, migrations, services, briefing assembler) is live; `healthie-mcp` (M1b),
+`healthie-backend` + Svelte SPA (M2+) to come. Conventions copied from `../glovebox`;
+legacy Python files at root are dead (healthie-45d) — ignore them.
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- Services: free async fns over `&impl ConnectionTrait`; multi-row writes take
+  `ConnectionTrait + TransactionTrait` and wrap all writes in one txn
+- All service fns return `DomainResult`; validation lives in services, never in
+  handlers/MCP tools; whitelist errors list valid values in the message
+- Tests: in-memory migrated `test_support::test_db()` (behind `test-support` feature);
+  inline `#[cfg(test)]` per service; date-dependent fns take `today: &str` param
+- SeaORM gotcha: never `.save()` with a `Set` PK — it always takes the UPDATE path
+  (RecordNotUpdated on first insert); branch `.insert()`/`.update()` explicitly
+- SQLite FKs are declared but INERT (no `PRAGMA foreign_keys=ON` yet — healthie-38x);
+  services self-enforce referential integrity via `require()` — keep doing so
+- Do NOT commit new `docs/superpowers/` specs/plans — decisions become ADRs in
+  `docs/adr/` (healthie-19k); active plans stay untracked on disk
+- Pending type-tightening (check `bd ready` before relying on current shapes):
+  chrono datetimes (healthie-8nb), enum columns replacing string whitelists
+  (healthie-rq2), stricter clippy doc lints (healthie-k18)
