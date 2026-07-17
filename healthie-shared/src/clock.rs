@@ -9,5 +9,5 @@ pub fn now() -> DateTime<Utc> {
 /// Today's UTC date.
 #[must_use]
 pub fn today() -> NaiveDate {
-    Utc::now().date_naive()
+    now().date_naive()
 }
