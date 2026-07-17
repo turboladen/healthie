@@ -53,8 +53,8 @@ bd close <id>         # Complete work
 ## Build & Test
 
 ```bash
-just ci        # full gate: build + test + clippy (workspace, --locked)
-just fmt       # cargo +nightly fmt (nightly required for rustfmt.toml options)
+just ci        # full gate: fmt-check + ci-backend (build + test + clippy, workspace, --locked)
+just fmt       # dprint fmt + cargo +nightly fmt (nightly required for rustfmt.toml options)
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings -D clippy::pedantic  # hard gate
 ```
