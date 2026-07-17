@@ -30,7 +30,10 @@
     "frontend",
     // Generated beads export mirror — never hand-formatted.
     ".beads",
-    // Local agent tooling (settings.json, hooks, worktrees) — not repo source.
+    // Agent tooling. Some of it IS tracked source (settings.json, hooks/),
+    // but Claude Code rewrites settings.json itself (formatting it invites
+    // churn wars) and worktrees/ holds full throwaway checkouts that dprint
+    // must not traverse. Excluded wholesale, matching chorez/kammerz.
     ".claude",
     // AI-agent instruction files with a beads-managed block
     // (`<!-- BEGIN BEADS INTEGRATION ... hash:… -->`). bd rewrites that block to
