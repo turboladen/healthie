@@ -17,18 +17,18 @@ pub async fn upsert(
     db: &impl ConnectionTrait,
     input: UpdateProfile,
 ) -> DomainResult<profile::Model> {
-    if let Some(Some(sex)) = &input.sex {
-        if !VALID_SEXES.contains(&sex.as_str()) {
-            return Err(DomainError::BadRequest(format!(
-                "Invalid sex '{sex}'. Must be one of: {}",
-                VALID_SEXES.join(", ")
-            )));
-        }
+    if let Some(Some(sex)) = &input.sex
+        && !VALID_SEXES.contains(&sex.as_str())
+    {
+        return Err(DomainError::BadRequest(format!(
+            "Invalid sex '{sex}'. Must be one of: {}",
+            VALID_SEXES.join(", ")
+        )));
     }
-    if let Some(Some(dob)) = &input.date_of_birth {
-        if chrono::NaiveDate::parse_from_str(dob, "%Y-%m-%d").is_err() {
-            return Err(DomainError::invalid("date_of_birth", "must be YYYY-MM-DD"));
-        }
+    if let Some(Some(dob)) = &input.date_of_birth
+        && chrono::NaiveDate::parse_from_str(dob, "%Y-%m-%d").is_err()
+    {
+        return Err(DomainError::invalid("date_of_birth", "must be YYYY-MM-DD"));
     }
 
     // Branch insert/update explicitly. Do NOT use `.save()`: with the PK Set(1) it

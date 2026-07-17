@@ -83,7 +83,8 @@ pub async fn record_outcome(
     let existing = require(db, id).await?;
     if existing.verdict.is_some() {
         return Err(DomainError::BadRequest(format!(
-            "Protocol {id} already has a verdict; start a new protocol instead of rewriting history"
+            "Protocol {id} already has a verdict; start a new protocol instead of rewriting \
+             history"
         )));
     }
     let mut active: protocol::ActiveModel = existing.into();

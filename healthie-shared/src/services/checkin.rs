@@ -127,9 +127,15 @@ mod tests {
     async fn responses_append_and_lock_after_complete() {
         let db = test_db().await;
         let ck = start(&db).await.unwrap();
-        record_response(&db, ck.id, "How was your week?", "Rough — back flared.", None)
-            .await
-            .unwrap();
+        record_response(
+            &db,
+            ck.id,
+            "How was your week?",
+            "Rough — back flared.",
+            None,
+        )
+        .await
+        .unwrap();
         record_response(&db, ck.id, "Sleep?", "Bad, kids sick.", None)
             .await
             .unwrap();

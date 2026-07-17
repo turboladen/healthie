@@ -1,3 +1,4 @@
+pub mod briefing;
 pub mod checkin;
 pub mod concern;
 pub mod goal;

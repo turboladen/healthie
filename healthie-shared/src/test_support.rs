@@ -6,7 +6,9 @@ use crate::migration::Migrator;
 /// In-memory `SQLite`, single pinned connection, fully migrated.
 pub async fn test_db() -> DatabaseConnection {
     let mut opt = ConnectOptions::new("sqlite::memory:");
-    opt.max_connections(1).min_connections(1).sqlx_logging(false);
+    opt.max_connections(1)
+        .min_connections(1)
+        .sqlx_logging(false);
     let db = Database::connect(opt)
         .await
         .expect("connect in-memory sqlite");
@@ -37,9 +39,7 @@ mod tests {
             let row = db
                 .query_one(Statement::from_string(
                     db.get_database_backend(),
-                    format!(
-                        "SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'"
-                    ),
+                    format!("SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'"),
                 ))
                 .await
                 .unwrap();
@@ -64,7 +64,10 @@ mod tests {
             .all(&db)
             .await
             .unwrap();
-        crate::entities::goal::Entity::find().all(&db).await.unwrap();
+        crate::entities::goal::Entity::find()
+            .all(&db)
+            .await
+            .unwrap();
         crate::entities::protocol::Entity::find()
             .all(&db)
             .await
@@ -81,7 +84,10 @@ mod tests {
             .all(&db)
             .await
             .unwrap();
-        crate::entities::plan::Entity::find().all(&db).await.unwrap();
+        crate::entities::plan::Entity::find()
+            .all(&db)
+            .await
+            .unwrap();
         crate::entities::plan_item::Entity::find()
             .all(&db)
             .await

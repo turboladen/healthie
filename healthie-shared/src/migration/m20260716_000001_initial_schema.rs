@@ -294,7 +294,12 @@ impl MigrationTrait for Migration {
             "profile",
         ] {
             manager
-                .drop_table(Table::drop().table(Alias::new(table)).if_exists().to_owned())
+                .drop_table(
+                    Table::drop()
+                        .table(Alias::new(table))
+                        .if_exists()
+                        .to_owned(),
+                )
                 .await?;
         }
         Ok(())

@@ -35,10 +35,10 @@ pub async fn log(
     if input.body.trim().is_empty() {
         return Err(DomainError::invalid("body", "must not be empty"));
     }
-    if let Some(s) = input.severity {
-        if !(1..=10).contains(&s) {
-            return Err(DomainError::invalid("severity", "must be 1-10"));
-        }
+    if let Some(s) = input.severity
+        && !(1..=10).contains(&s)
+    {
+        return Err(DomainError::invalid("severity", "must be 1-10"));
     }
     if let Some(cid) = input.concern_id {
         concern::require(db, cid).await?;
@@ -68,10 +68,7 @@ pub async fn pending_review(db: &impl ConnectionTrait) -> DomainResult<Vec<obser
         .await?)
 }
 
-pub async fn mark_reviewed(
-    db: &impl ConnectionTrait,
-    id: i32,
-) -> DomainResult<observation::Model> {
+pub async fn mark_reviewed(db: &impl ConnectionTrait, id: i32) -> DomainResult<observation::Model> {
     let existing = observation::Entity::find_by_id(id)
         .one(db)
         .await?

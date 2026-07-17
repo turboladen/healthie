@@ -29,7 +29,10 @@ pub struct PlanWithItems {
 
 pub async fn commit(db: &impl ConnectionTrait, input: NewPlan) -> DomainResult<PlanWithItems> {
     if input.items.is_empty() {
-        return Err(DomainError::invalid("items", "a plan needs at least one item"));
+        return Err(DomainError::invalid(
+            "items",
+            "a plan needs at least one item",
+        ));
     }
     for item in &input.items {
         if !VALID_ITEM_KINDS.contains(&item.kind.as_str()) {
@@ -148,10 +151,7 @@ pub async fn latest(db: &impl ConnectionTrait) -> DomainResult<Option<PlanWithIt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        inputs::plan::NewPlanItem,
-        test_support::test_db,
-    };
+    use crate::{inputs::plan::NewPlanItem, test_support::test_db};
 
     fn pt_plan() -> NewPlan {
         NewPlan {
