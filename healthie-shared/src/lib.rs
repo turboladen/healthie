@@ -13,6 +13,8 @@
 pub mod clock;
 pub mod entities;
 pub mod error;
+pub mod inputs;
 pub mod migration;
+pub mod services;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
