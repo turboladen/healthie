@@ -62,11 +62,10 @@ error handling.
   JSON wire format are unchanged. This is greenfield — the initial migration is edited in
   place, nothing is deployed.
 - **One documented divergence:** `ObservationOrigin::SelfReported` stores the DB
-  `string_value` `self_reported` while keeping the serde wire value `self`. SeaORM 1.1's
-  `DeriveActiveEnum` Pascal-cases each `string_value` into an internal marker-enum
-  identifier, and `self` collides with the reserved keyword `Self`, which will not compile.
-  The DB token is internal (no query filters on `origin`), so the MCP wire contract stays
-  byte-identical.
+  `string_value` `self_reported` while keeping the serde wire value `self`. In SeaORM 1.1,
+  `string_value = "self"` fails to compile: `DeriveActiveEnum` generates an identifier from
+  the value, which collides with the reserved keyword `Self`. The DB token is internal (no
+  query filters on `origin`), so the MCP wire contract stays byte-identical.
 - **Deliberate divergence from glovebox:** this is a conscious departure from the reference
   crate's conventions, documented here so future work does not "fix" it back toward
   TEXT-as-String.

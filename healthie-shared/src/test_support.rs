@@ -79,7 +79,9 @@ mod tests {
     async fn entities_match_schema() {
         use sea_orm::EntityTrait;
         let db = super::test_db().await;
-        // A find() per entity proves column names/types line up with the migration.
+        // A find() per entity decodes zero rows from empty tables: it proves the
+        // column names/types line up with the migration, not value round-trips —
+        // those are covered by the per-service insert-then-read tests.
         crate::entities::profile::Entity::find()
             .all(&db)
             .await

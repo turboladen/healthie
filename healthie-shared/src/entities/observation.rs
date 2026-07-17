@@ -5,12 +5,11 @@ use serde::{Deserialize, Serialize};
 /// the legal values.
 ///
 /// The JSON wire value is `self` (via serde), but the DB `string_value` is
-/// `self_reported`: `SeaORM` 1.1's `DeriveActiveEnum` Pascal-cases each
-/// `string_value` into an internal marker-enum identifier, and `self` becomes
-/// the reserved keyword `Self`, which will not compile. The DB token is an
-/// internal detail (greenfield schema, no query filters on `origin`), so
-/// diverging it from the wire value costs nothing while keeping the MCP wire
-/// contract byte-identical.
+/// `self_reported`: `string_value = "self"` fails to compile in `SeaORM` 1.1
+/// (`DeriveActiveEnum` generates an identifier from the value, which collides
+/// with the reserved keyword `Self`). The DB token is an internal detail
+/// (greenfield schema, no query filters on `origin`), so diverging it from the
+/// wire value costs nothing while keeping the MCP wire contract byte-identical.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
 #[sea_orm(rs_type = "String", db_type = "Text")]
 pub enum ObservationOrigin {
