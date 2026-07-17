@@ -11,6 +11,7 @@
 )]
 
 pub mod clock;
+pub mod entities;
 pub mod error;
 pub mod migration;
 #[cfg(any(test, feature = "test-support"))]
