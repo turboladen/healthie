@@ -6,14 +6,14 @@ use serde::Serialize;
 
 use crate::{
     clock::{now, today},
-    entities::{plan, plan_item, plan_item_outcome},
+    entities::{
+        plan, plan_item,
+        plan_item_outcome::{self, OutcomeStatus},
+    },
     error::{DomainError, DomainResult},
     inputs::plan::NewPlan,
     services::checkin,
 };
-
-pub const VALID_ITEM_KINDS: [&str; 2] = ["workout", "action"];
-pub const VALID_OUTCOME_STATUSES: [&str; 3] = ["done", "skipped", "partial"];
 
 #[derive(Debug, Serialize)]
 pub struct ItemWithOutcome {
@@ -38,13 +38,6 @@ pub async fn commit<C: ConnectionTrait + TransactionTrait>(
         ));
     }
     for item in &input.items {
-        if !VALID_ITEM_KINDS.contains(&item.kind.as_str()) {
-            return Err(DomainError::BadRequest(format!(
-                "Invalid item kind '{}'. Must be one of: {}",
-                item.kind,
-                VALID_ITEM_KINDS.join(", ")
-            )));
-        }
         if item.title.trim().is_empty() {
             return Err(DomainError::invalid("items.title", "must not be empty"));
         }
@@ -95,15 +88,9 @@ pub async fn commit<C: ConnectionTrait + TransactionTrait>(
 pub async fn record_item_outcome<C: ConnectionTrait + TransactionTrait>(
     db: &C,
     item_id: i32,
-    status: &str,
+    status: OutcomeStatus,
     note: Option<String>,
 ) -> DomainResult<plan_item_outcome::Model> {
-    if !VALID_OUTCOME_STATUSES.contains(&status) {
-        return Err(DomainError::BadRequest(format!(
-            "Invalid status '{status}'. Must be one of: {}",
-            VALID_OUTCOME_STATUSES.join(", ")
-        )));
-    }
     let item = plan_item::Entity::find_by_id(item_id)
         .one(db)
         .await?
@@ -120,7 +107,7 @@ pub async fn record_item_outcome<C: ConnectionTrait + TransactionTrait>(
     }
     let outcome = plan_item_outcome::ActiveModel {
         plan_item_id: Set(item.id),
-        status: Set(status.to_string()),
+        status: Set(status),
         note: Set(note),
         recorded_at: Set(now()),
         created_at: Set(now()),
@@ -162,6 +149,7 @@ pub async fn latest(db: &impl ConnectionTrait) -> DomainResult<Option<PlanWithIt
 mod tests {
     use super::*;
     use crate::{
+        entities::{plan_item::PlanItemKind, plan_item_outcome::OutcomeStatus},
         inputs::plan::NewPlanItem,
         test_support::{date, test_db},
     };
@@ -175,13 +163,13 @@ mod tests {
             nutrition: Some("More fish, no late snacking.".into()),
             items: vec![
                 NewPlanItem {
-                    kind: "workout".into(),
+                    kind: PlanItemKind::Workout,
                     title: "PT: bird-dogs 3x10".into(),
                     detail: None,
                     scheduled_for: Some(date("2026-07-17")),
                 },
                 NewPlanItem {
-                    kind: "action".into(),
+                    kind: PlanItemKind::Action,
                     title: "Book colonoscopy".into(),
                     detail: Some("GP referral first".into()),
                     scheduled_for: None,
@@ -200,19 +188,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn commit_rejects_empty_plan_and_bad_kind() {
+    async fn commit_rejects_empty_plan() {
         let db = test_db().await;
         let mut empty = pt_plan();
         empty.items.clear();
         assert!(matches!(
             commit(&db, empty).await,
             Err(DomainError::Invalid { .. })
-        ));
-        let mut bad = pt_plan();
-        bad.items[0].kind = "chore".into();
-        assert!(matches!(
-            commit(&db, bad).await,
-            Err(DomainError::BadRequest(_))
         ));
     }
 
@@ -221,10 +203,15 @@ mod tests {
         let db = test_db().await;
         let p = commit(&db, pt_plan()).await.unwrap();
         let item_id = p.items[0].item.id;
-        record_item_outcome(&db, item_id, "skipped", Some("back flared".into()))
-            .await
-            .unwrap();
-        record_item_outcome(&db, item_id, "partial", None)
+        record_item_outcome(
+            &db,
+            item_id,
+            OutcomeStatus::Skipped,
+            Some("back flared".into()),
+        )
+        .await
+        .unwrap();
+        record_item_outcome(&db, item_id, OutcomeStatus::Partial, None)
             .await
             .unwrap(); // replaces
         let latest = latest(&db).await.unwrap().unwrap();
@@ -236,6 +223,6 @@ mod tests {
             .outcome
             .as_ref()
             .unwrap();
-        assert_eq!(outcome.status, "partial");
+        assert_eq!(outcome.status, OutcomeStatus::Partial);
     }
 }

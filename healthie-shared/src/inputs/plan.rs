@@ -1,5 +1,7 @@
 use chrono::NaiveDate;
 
+use crate::entities::plan_item::PlanItemKind;
+
 #[derive(Debug)]
 pub struct NewPlan {
     pub checkin_id: Option<i32>,
@@ -14,8 +16,7 @@ pub struct NewPlan {
 
 #[derive(Debug)]
 pub struct NewPlanItem {
-    /// "workout" or "action".
-    pub kind: String,
+    pub kind: PlanItemKind,
     pub title: String,
     pub detail: Option<String>,
     /// For time-bound items Claude pushes to the calendar.

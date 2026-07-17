@@ -1,13 +1,6 @@
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, EntityTrait};
 
-use crate::{
-    clock::now,
-    entities::profile,
-    error::{DomainError, DomainResult},
-    inputs::profile::UpdateProfile,
-};
-
-pub const VALID_SEXES: [&str; 2] = ["male", "female"];
+use crate::{clock::now, entities::profile, error::DomainResult, inputs::profile::UpdateProfile};
 
 pub async fn get(db: &impl ConnectionTrait) -> DomainResult<Option<profile::Model>> {
     Ok(profile::Entity::find_by_id(1).one(db).await?)
@@ -17,15 +10,6 @@ pub async fn upsert(
     db: &impl ConnectionTrait,
     input: UpdateProfile,
 ) -> DomainResult<profile::Model> {
-    if let Some(Some(sex)) = &input.sex
-        && !VALID_SEXES.contains(&sex.as_str())
-    {
-        return Err(DomainError::BadRequest(format!(
-            "Invalid sex '{sex}'. Must be one of: {}",
-            VALID_SEXES.join(", ")
-        )));
-    }
-
     // Branch insert/update explicitly. Do NOT use `.save()`: with the PK Set(1) it
     // always takes the UPDATE path, which fails (RecordNotUpdated) on first call.
     let existing = get(db).await?;
@@ -61,7 +45,10 @@ pub async fn upsert(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{date, test_db};
+    use crate::{
+        entities::profile::Sex,
+        test_support::{date, test_db},
+    };
 
     #[tokio::test]
     async fn get_returns_none_before_first_upsert() {
@@ -76,7 +63,7 @@ mod tests {
             &db,
             UpdateProfile {
                 date_of_birth: Some(Some(date("1981-03-02"))),
-                sex: Some(Some("male".into())),
+                sex: Some(Some(Sex::Male)),
                 ..Default::default()
             },
         )
@@ -95,21 +82,5 @@ mod tests {
         assert_eq!(p2.id, 1);
         assert_eq!(p2.date_of_birth, Some(date("1981-03-02"))); // preserved
         assert_eq!(p2.height_cm, Some(180));
-    }
-
-    #[tokio::test]
-    async fn upsert_rejects_bad_sex() {
-        let db = test_db().await;
-        assert!(matches!(
-            upsert(
-                &db,
-                UpdateProfile {
-                    sex: Some(Some("yes".into())),
-                    ..Default::default()
-                }
-            )
-            .await,
-            Err(DomainError::BadRequest(_))
-        ));
     }
 }

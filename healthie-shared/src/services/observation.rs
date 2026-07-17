@@ -6,33 +6,16 @@ use sea_orm::{
 
 use crate::{
     clock::now,
-    entities::observation,
+    entities::observation::{self, ObservationOrigin},
     error::{DomainError, DomainResult},
     inputs::observation::NewObservation,
     services::concern,
 };
 
-pub const VALID_ORIGINS: [&str; 3] = ["self", "ai", "rules"];
-pub const VALID_KINDS: [&str; 2] = ["note", "symptom"];
-
 pub async fn log(
     db: &impl ConnectionTrait,
     input: NewObservation,
 ) -> DomainResult<observation::Model> {
-    if !VALID_ORIGINS.contains(&input.origin.as_str()) {
-        return Err(DomainError::BadRequest(format!(
-            "Invalid origin '{}'. Must be one of: {}",
-            input.origin,
-            VALID_ORIGINS.join(", ")
-        )));
-    }
-    if !VALID_KINDS.contains(&input.kind.as_str()) {
-        return Err(DomainError::BadRequest(format!(
-            "Invalid kind '{}'. Must be one of: {}",
-            input.kind,
-            VALID_KINDS.join(", ")
-        )));
-    }
     if input.body.trim().is_empty() {
         return Err(DomainError::invalid("body", "must not be empty"));
     }
@@ -44,7 +27,7 @@ pub async fn log(
     if let Some(cid) = input.concern_id {
         concern::require(db, cid).await?;
     }
-    let reviewed = i32::from(input.origin == "self");
+    let reviewed = i32::from(input.origin == ObservationOrigin::SelfReported);
     Ok(observation::ActiveModel {
         occurred_at: Set(input.occurred_at.unwrap_or_else(now)),
         origin: Set(input.origin),
@@ -94,12 +77,15 @@ pub async fn recent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{datetime, test_db};
+    use crate::{
+        entities::observation::{ObservationKind, ObservationOrigin},
+        test_support::{datetime, test_db},
+    };
 
-    fn spasm(origin: &str) -> NewObservation {
+    fn spasm(origin: ObservationOrigin) -> NewObservation {
         NewObservation {
-            origin: origin.into(),
-            kind: "symptom".into(),
+            origin,
+            kind: ObservationKind::Symptom,
             body: "Back spasm getting out of the car".into(),
             severity: Some(6),
             concern_id: None,
@@ -110,12 +96,14 @@ mod tests {
     #[tokio::test]
     async fn self_observations_need_no_review_but_ai_do() {
         let db = test_db().await;
-        log(&db, spasm("self")).await.unwrap();
+        log(&db, spasm(ObservationOrigin::SelfReported))
+            .await
+            .unwrap();
         let ai = log(
             &db,
             NewObservation {
-                origin: "ai".into(),
-                kind: "note".into(),
+                origin: ObservationOrigin::Ai,
+                kind: ObservationKind::Note,
                 body: "Resting HR elevated since Tuesday".into(),
                 severity: None,
                 concern_id: None,
@@ -132,19 +120,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn log_validates_origin_kind_severity() {
+    async fn log_validates_severity() {
         let db = test_db().await;
-        assert!(matches!(
-            log(&db, spasm("claude")).await,
-            Err(DomainError::BadRequest(_))
-        ));
-        let mut bad_kind = spasm("self");
-        bad_kind.kind = "feeling".into();
-        assert!(matches!(
-            log(&db, bad_kind).await,
-            Err(DomainError::BadRequest(_))
-        ));
-        let mut bad_sev = spasm("self");
+        let mut bad_sev = spasm(ObservationOrigin::SelfReported);
         bad_sev.severity = Some(11);
         assert!(matches!(
             log(&db, bad_sev).await,
@@ -155,10 +133,12 @@ mod tests {
     #[tokio::test]
     async fn recent_filters_by_date() {
         let db = test_db().await;
-        let mut old = spasm("self");
+        let mut old = spasm(ObservationOrigin::SelfReported);
         old.occurred_at = Some(datetime("2026-01-01 08:00:00"));
         log(&db, old).await.unwrap();
-        log(&db, spasm("self")).await.unwrap(); // now
+        log(&db, spasm(ObservationOrigin::SelfReported))
+            .await
+            .unwrap(); // now
         assert_eq!(
             recent(&db, datetime("2026-06-01 00:00:00"))
                 .await

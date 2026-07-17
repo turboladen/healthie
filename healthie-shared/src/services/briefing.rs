@@ -95,6 +95,12 @@ pub async fn assemble(db: &impl ConnectionTrait, today: NaiveDate) -> DomainResu
 mod tests {
     use super::*;
     use crate::{
+        entities::{
+            concern_tag::ConcernTag,
+            observation::{ObservationKind, ObservationOrigin},
+            plan_item::PlanItemKind,
+            protocol::ProtocolKind,
+        },
         inputs::{
             concern::NewConcern,
             observation::NewObservation,
@@ -124,7 +130,7 @@ mod tests {
             NewConcern {
                 name: "Bad back".into(),
                 narrative: None,
-                tags: vec!["musculoskeletal".into()],
+                tags: vec![ConcernTag::Musculoskeletal],
                 opened_on: None,
             },
         )
@@ -136,7 +142,7 @@ mod tests {
                 concern_id: Some(c.concern.id),
                 goal_id: None,
                 name: "Magnesium".into(),
-                kind: "supplement".into(),
+                kind: ProtocolKind::Supplement,
                 purpose: None,
                 schedule: None,
                 started_on: None,
@@ -148,8 +154,8 @@ mod tests {
         observation::log(
             &db,
             NewObservation {
-                origin: "ai".into(),
-                kind: "note".into(),
+                origin: ObservationOrigin::Ai,
+                kind: ObservationKind::Note,
                 body: "HR trending up".into(),
                 severity: None,
                 concern_id: None,
@@ -172,7 +178,7 @@ mod tests {
                 guidance: None,
                 nutrition: None,
                 items: vec![NewPlanItem {
-                    kind: "workout".into(),
+                    kind: PlanItemKind::Workout,
                     title: "PT bird-dogs".into(),
                     detail: None,
                     scheduled_for: None,
@@ -184,7 +190,7 @@ mod tests {
 
         let b = assemble(&db, date("2026-07-16")).await.unwrap();
         assert_eq!(b.active_concerns.len(), 1);
-        assert_eq!(b.active_concerns[0].tags, vec!["musculoskeletal"]);
+        assert_eq!(b.active_concerns[0].tags, vec![ConcernTag::Musculoskeletal]);
         assert!(b.active_protocols[0].overdue_review);
         assert_eq!(b.observations_pending_review.len(), 1);
         assert!(b.previous_plan.is_some());
