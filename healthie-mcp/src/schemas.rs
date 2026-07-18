@@ -4,18 +4,20 @@
 //! via `into_domain()`. Vocabulary enums come straight from the domain
 //! (`schemars` feature on healthie-shared) so schemas can never drift.
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use healthie_shared::{
     entities::{
         concern::ConcernStatus,
         concern_tag::ConcernTag,
         goal::GoalComparison,
+        observation::{ObservationKind, ObservationOrigin},
         profile::Sex,
         protocol::{ProtocolKind, ProtocolVerdict},
     },
     inputs::{
         concern::NewConcern,
         goal::NewGoal,
+        observation::NewObservation,
         profile::UpdateProfile,
         protocol::{NewProtocol, ProtocolOutcome},
     },
@@ -175,6 +177,60 @@ impl UpdateProfileInput {
             sex: self.sex.map(Some),
             height_cm: self.height_cm.map(Some),
             notes: self.notes.map(Some),
+        }
+    }
+}
+
+/// Log a freeform observation (a note — for symptoms use `log_symptom`).
+#[derive(Deserialize, JsonSchema)]
+pub struct LogObservationInput {
+    /// `self` when relaying something Steve reported (auto-marked reviewed);
+    /// `ai` for your own inference (queued for his review).
+    pub origin: ObservationOrigin,
+    pub body: String,
+    /// Link to a concern id when clearly related.
+    pub concern_id: Option<i32>,
+    /// When it happened (RFC 3339 UTC); defaults to now.
+    pub occurred_at: Option<DateTime<Utc>>,
+}
+
+impl LogObservationInput {
+    #[must_use]
+    pub fn into_domain(self) -> NewObservation {
+        NewObservation {
+            origin: self.origin,
+            kind: ObservationKind::Note,
+            body: self.body,
+            severity: None,
+            concern_id: self.concern_id,
+            occurred_at: self.occurred_at,
+        }
+    }
+}
+
+/// Log a symptom, optionally with 1–10 severity.
+#[derive(Deserialize, JsonSchema)]
+pub struct LogSymptomInput {
+    /// `self` when relaying something Steve reported; `ai` for inference.
+    pub origin: ObservationOrigin,
+    pub body: String,
+    /// 1 (barely noticeable) to 10 (worst imaginable).
+    pub severity: Option<i32>,
+    pub concern_id: Option<i32>,
+    /// When it happened (RFC 3339 UTC); defaults to now.
+    pub occurred_at: Option<DateTime<Utc>>,
+}
+
+impl LogSymptomInput {
+    #[must_use]
+    pub fn into_domain(self) -> NewObservation {
+        NewObservation {
+            origin: self.origin,
+            kind: ObservationKind::Symptom,
+            body: self.body,
+            severity: self.severity,
+            concern_id: self.concern_id,
+            occurred_at: self.occurred_at,
         }
     }
 }

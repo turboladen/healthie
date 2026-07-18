@@ -272,6 +272,54 @@ async fn update_profile_sets_fields_visible_in_briefing() {
 }
 
 #[tokio::test]
+async fn log_observation_from_self_is_auto_reviewed() {
+    let (app, _db) = setup().await;
+    handshake(&app).await;
+    let body = post_rpc(
+        &app,
+        call_tool(
+            "log_observation",
+            json!({ "origin": "self", "body": "Slept 8h, felt great." }),
+        ),
+    )
+    .await;
+    let payload = tool_payload(&body);
+    assert_eq!(payload["kind"], "note");
+    assert_eq!(payload["reviewed"], 1, "self-origin auto-reviewed");
+}
+
+#[tokio::test]
+async fn log_symptom_validates_severity_range() {
+    let (app, _db) = setup().await;
+    handshake(&app).await;
+    let body = post_rpc(
+        &app,
+        call_tool(
+            "log_symptom",
+            json!({ "origin": "self", "body": "Sharp shoulder twinge", "severity": 11 }),
+        ),
+    )
+    .await;
+    let (is_error, text) = tool_result(&body);
+    assert!(is_error, "severity 11 must be rejected: {text}");
+
+    let body = post_rpc(
+        &app,
+        call_tool(
+            "log_symptom",
+            json!({
+                "origin": "ai", "body": "Recurring afternoon headaches inferred from notes",
+                "severity": 4
+            }),
+        ),
+    )
+    .await;
+    let payload = tool_payload(&body);
+    assert_eq!(payload["kind"], "symptom");
+    assert_eq!(payload["reviewed"], 0, "ai-origin awaits review");
+}
+
+#[tokio::test]
 async fn tools_list_responds() {
     let (app, _db) = setup().await;
     handshake(&app).await;

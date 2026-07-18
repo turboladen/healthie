@@ -8,7 +8,7 @@ use std::sync::Arc;
 use healthie_shared::{
     clock,
     error::{DomainError, DomainResult},
-    services::{briefing, concern, goal, profile, protocol},
+    services::{briefing, concern, goal, observation, profile, protocol},
 };
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -23,8 +23,9 @@ use sea_orm::DatabaseConnection;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::schemas::{
-    EmptyParams, OpenConcernInput, RecordProtocolOutcomeInput, SetGoalInput, StartProtocolInput,
-    UpdateConcernStatusInput, UpdateProfileInput,
+    EmptyParams, LogObservationInput, LogSymptomInput, OpenConcernInput,
+    RecordProtocolOutcomeInput, SetGoalInput, StartProtocolInput, UpdateConcernStatusInput,
+    UpdateProfileInput,
 };
 
 #[derive(Clone)]
@@ -182,6 +183,41 @@ impl HealthieMcp {
             Err(e) => return Ok(e),
         };
         domain_result(profile::upsert(&*self.db, input.into_domain()).await)
+    }
+
+    #[tool(
+        name = "log_observation",
+        description = "Capture a health note the moment it comes up — sleep, mood, energy, \
+            context. Anything worth the next briefing knowing. Not for symptoms \
+            (log_symptom) or commitments (commit_plan).",
+        input_schema = rmcp::handler::server::common::schema_for_type::<LogObservationInput>()
+    )]
+    async fn log_observation(
+        &self,
+        params: LenientParameters<LogObservationInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = match params.into_tool_input("log_observation") {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+        domain_result(observation::log(&*self.db, input.into_domain()).await)
+    }
+
+    #[tool(
+        name = "log_symptom",
+        description = "Record a symptom with optional 1-10 severity, linked to a concern \
+            when clearly related. Recurring symptoms may deserve open_concern.",
+        input_schema = rmcp::handler::server::common::schema_for_type::<LogSymptomInput>()
+    )]
+    async fn log_symptom(
+        &self,
+        params: LenientParameters<LogSymptomInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = match params.into_tool_input("log_symptom") {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+        domain_result(observation::log(&*self.db, input.into_domain()).await)
     }
 }
 
