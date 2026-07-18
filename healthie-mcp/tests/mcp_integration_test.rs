@@ -1,23 +1,34 @@
 //! Wire-level tests: drive the production `router()` through real JSON-RPC
 //! over streamable HTTP via `tower::oneshot` — no network socket.
 
-use axum::{Router, body::Body, http::Request};
+use axum::{
+    Router,
+    body::Body,
+    http::{Request, StatusCode},
+};
 use sea_orm::DatabaseConnection;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-async fn setup() -> (Router, DatabaseConnection) {
+async fn setup() -> (Router, DatabaseConnection, String) {
     let db = healthie_shared::test_support::test_db().await;
-    (healthie_mcp::router(db.clone()), db)
+    let issued = healthie_shared::services::mcp_token::provision(&db)
+        .await
+        .expect("provision test token");
+    (healthie_mcp::router(db.clone()), db, issued.plaintext)
 }
 
-async fn post_rpc(app: &Router, body: Value) -> String {
-    let request = Request::builder()
+async fn post_rpc_as(app: &Router, bearer: Option<&str>, body: Value) -> (StatusCode, String) {
+    let mut builder = Request::builder()
         .method("POST")
         .uri("/")
         .header("host", "localhost")
         .header("content-type", "application/json")
-        .header("accept", "application/json, text/event-stream")
+        .header("accept", "application/json, text/event-stream");
+    if let Some(token) = bearer {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
+    let request = builder
         .body(Body::from(body.to_string()))
         .expect("build request");
     let response = app.clone().oneshot(request).await.expect("send request");
@@ -25,14 +36,22 @@ async fn post_rpc(app: &Router, body: Value) -> String {
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("read body");
-    let text = String::from_utf8(bytes.to_vec()).expect("utf8 body");
+    (
+        status,
+        String::from_utf8(bytes.to_vec()).expect("utf8 body"),
+    )
+}
+
+async fn post_rpc(app: &Router, token: &str, body: Value) -> String {
+    let (status, text) = post_rpc_as(app, Some(token), body).await;
     assert!(status.is_success(), "rpc failed: {status} body={text}");
     text
 }
 
-async fn handshake(app: &Router) {
+async fn handshake(app: &Router, token: &str) {
     let body = post_rpc(
         app,
+        token,
         json!({
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {
@@ -49,6 +68,7 @@ async fn handshake(app: &Router) {
     );
     post_rpc(
         app,
+        token,
         json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
     )
     .await;
@@ -95,16 +115,118 @@ fn assert_tool_error(body: &str, needle: &str) {
 }
 
 #[tokio::test]
+async fn requests_without_bearer_are_401() {
+    let (app, _db, _token) = setup().await;
+    let (status, body) = post_rpc_as(
+        &app,
+        None,
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        body.contains("Bearer"),
+        "401 body should say what's missing: {body}"
+    );
+    let parsed: Value = serde_json::from_str(&body).expect("401 body is json");
+    assert!(
+        parsed["error"].is_string(),
+        "401 must carry the {{\"error\": ...}} contract: {body}"
+    );
+}
+
+#[tokio::test]
+async fn unrecognized_token_is_401_before_rmcp() {
+    let (app, _db, _token) = setup().await;
+    let shaped_but_wrong = "A".repeat(43);
+    let (status, body) = post_rpc_as(
+        &app,
+        Some(&shaped_but_wrong),
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(body.contains("invalid or revoked"), "{body}");
+}
+
+#[tokio::test]
+async fn revoked_and_rotated_tokens_are_401() {
+    let (app, db, token) = setup().await;
+    healthie_shared::services::mcp_token::revoke(&db)
+        .await
+        .expect("revoke");
+    let (status, _) = post_rpc_as(
+        &app,
+        Some(&token),
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "revoked token must fail");
+
+    let second = healthie_shared::services::mcp_token::provision(&db)
+        .await
+        .expect("rotate");
+    let (status, _) = post_rpc_as(
+        &app,
+        Some(&token),
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "pre-rotation token must fail"
+    );
+    let (status, _) = post_rpc_as(
+        &app,
+        Some(&second.plaintext),
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+    )
+    .await;
+    assert!(status.is_success(), "current token must work");
+}
+
+#[tokio::test]
+async fn valid_token_reaches_tools_end_to_end() {
+    // Proves middleware → axum Parts → rmcp RequestContext → tool guard plumbing.
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
+    let body = post_rpc(&app, &token, call_tool("get_briefing", json!({}))).await;
+    let payload = tool_payload(&body);
+    assert!(payload["generated_on"].is_string());
+    assert!(!body.contains("missing authenticated operator"), "{body}");
+}
+
+#[tokio::test]
+async fn unknown_host_header_is_rejected() {
+    // rmcp's DNS-rebinding defense stays live behind our auth layer.
+    let (app, _db, token) = setup().await;
+    let request = Request::builder()
+        .method("POST")
+        .uri("/")
+        .header("host", "evil.example.com")
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }).to_string(),
+        ))
+        .expect("build request");
+    let response = app.clone().oneshot(request).await.expect("send");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn handshake_succeeds_statelessly() {
-    let (app, _db) = setup().await;
-    handshake(&app).await;
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
 }
 
 #[tokio::test]
 async fn get_briefing_on_empty_db_returns_briefing_json() {
-    let (app, _db) = setup().await;
-    handshake(&app).await;
-    let body = post_rpc(&app, call_tool("get_briefing", json!({}))).await;
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
+    let body = post_rpc(&app, &token, call_tool("get_briefing", json!({}))).await;
     let payload = tool_payload(&body);
     assert!(payload["generated_on"].is_string());
     assert_eq!(payload["active_concerns"], json!([]));
@@ -113,10 +235,11 @@ async fn get_briefing_on_empty_db_returns_briefing_json() {
 
 #[tokio::test]
 async fn open_concern_round_trips_with_tags() {
-    let (app, _db) = setup().await;
-    handshake(&app).await;
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
     let body = post_rpc(
         &app,
+        &token,
         call_tool(
             "open_concern",
             json!({
@@ -131,7 +254,7 @@ async fn open_concern_round_trips_with_tags() {
     assert_eq!(payload["concern"]["name"], "Right shoulder pain");
     assert_eq!(payload["tags"], json!(["musculoskeletal", "fitness"]));
 
-    let body = post_rpc(&app, call_tool("get_briefing", json!({}))).await;
+    let body = post_rpc(&app, &token, call_tool("get_briefing", json!({}))).await;
     let payload = tool_payload(&body);
     assert_eq!(
         payload["active_concerns"][0]["concern"]["name"],
@@ -141,10 +264,11 @@ async fn open_concern_round_trips_with_tags() {
 
 #[tokio::test]
 async fn open_concern_rejects_unknown_tag_with_schema_hint() {
-    let (app, _db) = setup().await;
-    handshake(&app).await;
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
     let body = post_rpc(
         &app,
+        &token,
         call_tool(
             "open_concern",
             json!({ "name": "X", "tags": ["not-a-real-tag"] }),
@@ -156,10 +280,11 @@ async fn open_concern_rejects_unknown_tag_with_schema_hint() {
 
 #[tokio::test]
 async fn update_concern_status_resolves_and_reports_not_found() {
-    let (app, _db) = setup().await;
-    handshake(&app).await;
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
     let body = post_rpc(
         &app,
+        &token,
         call_tool("open_concern", json!({ "name": "Sleep debt" })),
     )
     .await;
@@ -167,6 +292,7 @@ async fn update_concern_status_resolves_and_reports_not_found() {
 
     let body = post_rpc(
         &app,
+        &token,
         call_tool(
             "update_concern_status",
             json!({ "concern_id": id, "status": "resolved", "note": "Consistent 7h for a month." }),
@@ -179,6 +305,7 @@ async fn update_concern_status_resolves_and_reports_not_found() {
 
     let body = post_rpc(
         &app,
+        &token,
         call_tool(
             "update_concern_status",
             json!({ "concern_id": 9999, "status": "active" }),
@@ -190,11 +317,12 @@ async fn update_concern_status_resolves_and_reports_not_found() {
 
 #[tokio::test]
 async fn set_goal_surfaces_domain_validation_as_tool_error() {
-    let (app, _db) = setup().await;
-    handshake(&app).await;
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
     // range comparison without target_high is a domain Invalid
     let body = post_rpc(
         &app,
+        &token,
         call_tool(
             "set_goal",
             json!({ "title": "Bodyweight in range", "comparison": "range", "target_value": 175.0 }),
@@ -207,10 +335,11 @@ async fn set_goal_surfaces_domain_validation_as_tool_error() {
 
 #[tokio::test]
 async fn protocol_lifecycle_start_outcome_history() {
-    let (app, _db) = setup().await;
-    handshake(&app).await;
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
     let body = post_rpc(
         &app,
+        &token,
         call_tool(
             "start_protocol",
             json!({
@@ -224,6 +353,7 @@ async fn protocol_lifecycle_start_outcome_history() {
 
     let body = post_rpc(
         &app,
+        &token,
         call_tool(
             "record_protocol_outcome",
             json!({ "protocol_id": id, "verdict": "worked", "rationale": "Gym volume up, no sides." }),
@@ -235,6 +365,7 @@ async fn protocol_lifecycle_start_outcome_history() {
     // Verdicts are permanent — recording twice is a BadRequest tool error.
     let body = post_rpc(
         &app,
+        &token,
         call_tool(
             "record_protocol_outcome",
             json!({ "protocol_id": id, "verdict": "mixed", "rationale": "second thoughts" }),
@@ -244,7 +375,7 @@ async fn protocol_lifecycle_start_outcome_history() {
     let (is_error, _) = tool_result(&body);
     assert!(is_error, "verdict must be immutable");
 
-    let body = post_rpc(&app, call_tool("get_protocol_history", json!({}))).await;
+    let body = post_rpc(&app, &token, call_tool("get_protocol_history", json!({}))).await;
     let payload = tool_payload(&body);
     assert_eq!(payload[0]["name"], "Creatine 5g daily");
     assert_eq!(payload[0]["verdict"], "worked");
@@ -252,10 +383,11 @@ async fn protocol_lifecycle_start_outcome_history() {
 
 #[tokio::test]
 async fn update_profile_sets_fields_visible_in_briefing() {
-    let (app, _db) = setup().await;
-    handshake(&app).await;
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
     let body = post_rpc(
         &app,
+        &token,
         call_tool(
             "update_profile",
             json!({ "date_of_birth": "1980-03-14", "sex": "male", "height_cm": 180 }),
@@ -264,16 +396,17 @@ async fn update_profile_sets_fields_visible_in_briefing() {
     .await;
     assert_eq!(tool_payload(&body)["height_cm"], 180);
 
-    let body = post_rpc(&app, call_tool("get_briefing", json!({}))).await;
+    let body = post_rpc(&app, &token, call_tool("get_briefing", json!({}))).await;
     assert_eq!(tool_payload(&body)["profile"]["sex"], "male");
 }
 
 #[tokio::test]
 async fn log_observation_from_self_is_auto_reviewed() {
-    let (app, _db) = setup().await;
-    handshake(&app).await;
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
     let body = post_rpc(
         &app,
+        &token,
         call_tool(
             "log_observation",
             json!({ "origin": "self", "body": "Slept 8h, felt great." }),
@@ -287,10 +420,11 @@ async fn log_observation_from_self_is_auto_reviewed() {
 
 #[tokio::test]
 async fn log_symptom_validates_severity_range() {
-    let (app, _db) = setup().await;
-    handshake(&app).await;
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
     let body = post_rpc(
         &app,
+        &token,
         call_tool(
             "log_symptom",
             json!({ "origin": "self", "body": "Sharp shoulder twinge", "severity": 11 }),
@@ -302,6 +436,7 @@ async fn log_symptom_validates_severity_range() {
 
     let body = post_rpc(
         &app,
+        &token,
         call_tool(
             "log_symptom",
             json!({
@@ -318,14 +453,14 @@ async fn log_symptom_validates_severity_range() {
 
 #[tokio::test]
 async fn full_checkin_loop_start_respond_plan_complete_outcome() {
-    let (app, _db) = setup().await;
-    handshake(&app).await;
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
 
-    let body = post_rpc(&app, call_tool("start_checkin", json!({}))).await;
+    let body = post_rpc(&app, &token, call_tool("start_checkin", json!({}))).await;
     let checkin_id = tool_payload(&body)["id"].as_i64().expect("checkin id");
 
     // start_checkin is idempotent within a day — resuming returns the same id.
-    let body = post_rpc(&app, call_tool("start_checkin", json!({}))).await;
+    let body = post_rpc(&app, &token, call_tool("start_checkin", json!({}))).await;
     assert_eq!(tool_payload(&body)["id"].as_i64(), Some(checkin_id));
 
     for (q, a) in [
@@ -337,6 +472,7 @@ async fn full_checkin_loop_start_respond_plan_complete_outcome() {
     ] {
         let body = post_rpc(
             &app,
+            &token,
             call_tool(
                 "record_checkin_response",
                 json!({ "checkin_id": checkin_id, "question": q, "answer": a }),
@@ -348,6 +484,7 @@ async fn full_checkin_loop_start_respond_plan_complete_outcome() {
 
     let body = post_rpc(
         &app,
+        &token,
         call_tool(
             "commit_plan",
             json!({
@@ -367,6 +504,7 @@ async fn full_checkin_loop_start_respond_plan_complete_outcome() {
 
     let body = post_rpc(
         &app,
+        &token,
         call_tool(
             "complete_checkin",
             json!({
@@ -381,6 +519,7 @@ async fn full_checkin_loop_start_respond_plan_complete_outcome() {
     // Completing twice is a BadRequest tool error.
     let body = post_rpc(
         &app,
+        &token,
         call_tool(
             "complete_checkin",
             json!({ "checkin_id": checkin_id, "summary": "again" }),
@@ -392,6 +531,7 @@ async fn full_checkin_loop_start_respond_plan_complete_outcome() {
 
     let body = post_rpc(
         &app,
+        &token,
         call_tool(
             "record_plan_outcome",
             json!({ "plan_item_id": item_id, "status": "done", "note": "All 3 sessions." }),
@@ -401,7 +541,7 @@ async fn full_checkin_loop_start_respond_plan_complete_outcome() {
     assert_eq!(tool_payload(&body)["status"], "done");
 
     // The next briefing opens with the commitments + outcomes on file.
-    let body = post_rpc(&app, call_tool("get_briefing", json!({}))).await;
+    let body = post_rpc(&app, &token, call_tool("get_briefing", json!({}))).await;
     let briefing = tool_payload(&body);
     assert_eq!(
         briefing["last_checkin"]["summary"],
@@ -415,12 +555,13 @@ async fn full_checkin_loop_start_respond_plan_complete_outcome() {
 
 #[tokio::test]
 async fn record_checkin_response_rejects_completed_checkin() {
-    let (app, _db) = setup().await;
-    handshake(&app).await;
-    let body = post_rpc(&app, call_tool("start_checkin", json!({}))).await;
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
+    let body = post_rpc(&app, &token, call_tool("start_checkin", json!({}))).await;
     let id = tool_payload(&body)["id"].as_i64().expect("id");
     post_rpc(
         &app,
+        &token,
         call_tool(
             "complete_checkin",
             json!({ "checkin_id": id, "summary": "quick one" }),
@@ -429,6 +570,7 @@ async fn record_checkin_response_rejects_completed_checkin() {
     .await;
     let body = post_rpc(
         &app,
+        &token,
         call_tool(
             "record_checkin_response",
             json!({ "checkin_id": id, "question": "late?", "answer": "too late" }),
@@ -441,10 +583,11 @@ async fn record_checkin_response_rejects_completed_checkin() {
 
 #[tokio::test]
 async fn record_checkin_response_links_a_real_concern() {
-    let (app, _db) = setup().await;
-    handshake(&app).await;
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
     let body = post_rpc(
         &app,
+        &token,
         call_tool("open_concern", json!({ "name": "Lower back tightness" })),
     )
     .await;
@@ -452,11 +595,12 @@ async fn record_checkin_response_links_a_real_concern() {
         .as_i64()
         .expect("concern id");
 
-    let body = post_rpc(&app, call_tool("start_checkin", json!({}))).await;
+    let body = post_rpc(&app, &token, call_tool("start_checkin", json!({}))).await;
     let checkin_id = tool_payload(&body)["id"].as_i64().expect("checkin id");
 
     let body = post_rpc(
         &app,
+        &token,
         call_tool(
             "record_checkin_response",
             json!({
@@ -474,13 +618,14 @@ async fn record_checkin_response_links_a_real_concern() {
 
 #[tokio::test]
 async fn record_checkin_response_rejects_unknown_concern() {
-    let (app, _db) = setup().await;
-    handshake(&app).await;
-    let body = post_rpc(&app, call_tool("start_checkin", json!({}))).await;
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
+    let body = post_rpc(&app, &token, call_tool("start_checkin", json!({}))).await;
     let checkin_id = tool_payload(&body)["id"].as_i64().expect("checkin id");
 
     let body = post_rpc(
         &app,
+        &token,
         call_tool(
             "record_checkin_response",
             json!({
@@ -497,20 +642,26 @@ async fn record_checkin_response_rejects_unknown_concern() {
 
 #[tokio::test]
 async fn commit_plan_requires_items() {
-    let (app, _db) = setup().await;
-    handshake(&app).await;
-    let body = post_rpc(&app, call_tool("commit_plan", json!({ "items": [] }))).await;
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool("commit_plan", json!({ "items": [] })),
+    )
+    .await;
     let (is_error, _) = tool_result(&body);
     assert!(is_error, "empty plan must be rejected");
 }
 
 #[tokio::test]
 async fn briefing_resource_lists_and_reads() {
-    let (app, _db) = setup().await;
-    handshake(&app).await;
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
 
     let body = post_rpc(
         &app,
+        &token,
         json!({ "jsonrpc": "2.0", "id": 3, "method": "resources/list" }),
     )
     .await;
@@ -522,6 +673,7 @@ async fn briefing_resource_lists_and_reads() {
 
     let body = post_rpc(
         &app,
+        &token,
         json!({
             "jsonrpc": "2.0", "id": 4, "method": "resources/read",
             "params": { "uri": "healthie://briefing" }
@@ -538,10 +690,11 @@ async fn briefing_resource_lists_and_reads() {
 
 #[tokio::test]
 async fn unknown_resource_uri_is_invalid_params() {
-    let (app, _db) = setup().await;
-    handshake(&app).await;
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
     let body = post_rpc(
         &app,
+        &token,
         json!({
             "jsonrpc": "2.0", "id": 5, "method": "resources/read",
             "params": { "uri": "healthie://nope" }
@@ -557,10 +710,11 @@ async fn unknown_resource_uri_is_invalid_params() {
 
 #[tokio::test]
 async fn checkin_prompt_renders_over_the_wire() {
-    let (app, _db) = setup().await;
-    handshake(&app).await;
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
     let body = post_rpc(
         &app,
+        &token,
         json!({
             "jsonrpc": "2.0", "id": 6, "method": "prompts/get",
             "params": { "name": "checkin", "arguments": { "focus": "knee clicking" } }
@@ -592,10 +746,11 @@ const EXPECTED_TOOLS: [&str; 15] = [
 
 #[tokio::test]
 async fn tools_list_advertises_all_tools_with_populated_schemas() {
-    let (app, _db) = setup().await;
-    handshake(&app).await;
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
     let body = post_rpc(
         &app,
+        &token,
         json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
     )
     .await;

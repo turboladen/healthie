@@ -60,7 +60,10 @@ impl HealthieMcp {
     async fn get_briefing(
         &self,
         params: LenientParameters<EmptyParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        // Fails loudly if the router was ever mounted without the auth layer.
+        let _operator = crate::auth::authenticated_operator(&context)?;
         let EmptyParams {} = match params.into_tool_input("get_briefing") {
             Ok(v) => v,
             Err(e) => return Ok(e),

@@ -23,6 +23,7 @@ argon2 = { version = "0.5", features = ["std"] }
 base64 = "0.22"
 schemars = { version = "1", features = ["chrono04"] }
 axum = "0.8"
+axum-extra = { version = "0.10", features = ["typed-header"] }
 rmcp = { version = "2.2", features = ["server", "macros", "transport-streamable-http-server", "schemars"] }
 tower = "0.5"
 

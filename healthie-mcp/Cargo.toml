@@ -6,6 +6,7 @@ version.workspace = true
 [dependencies]
 healthie-shared = { path = "../healthie-shared", features = ["schemars"] }
 axum.workspace = true
+axum-extra.workspace = true
 chrono.workspace = true
 rmcp.workspace = true
 schemars.workspace = true

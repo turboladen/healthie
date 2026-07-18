@@ -4,26 +4,31 @@
 //! binary (`healthie-mcp serve|token`) that hosts it until the backend exists.
 //! Transport is streamable HTTP in STATELESS mode: no session ids, plain JSON
 //! responses — server restarts never strand a client mid-conversation.
-//! Security: bearer-token middleware (added in a later unit) + rmcp's Host
-//! allowlist (DNS-rebinding defense; extend via `HEALTHIE_MCP_ALLOWED_HOSTS`).
+//! Security: bearer-token middleware (see [`auth`]) + rmcp's Host allowlist
+//! (DNS-rebinding defense; extend via `HEALTHIE_MCP_ALLOWED_HOSTS`).
 
+pub mod auth;
 mod handler;
 mod prompts;
 mod schemas;
 
 use std::sync::Arc;
 
-use axum::Router;
+use axum::{Router, middleware};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager,
     tower::{StreamableHttpServerConfig, StreamableHttpService},
 };
 use sea_orm::DatabaseConnection;
 
-pub use handler::HealthieMcp;
+pub use handler::{BRIEFING_URI, HealthieMcp};
 
-/// Build the `/mcp` router: stateless streamable-HTTP rmcp service.
+/// Build the `/mcp` router: stateless streamable-HTTP rmcp service behind the
+/// bearer-token auth layer.
 pub fn router(db: DatabaseConnection) -> Router {
+    // The factory captures its own clone; `db` moves into the auth layer state.
+    let handler_db = db.clone();
+
     let default_config = StreamableHttpServerConfig::default();
     let allowed_hosts = merge_allowed_hosts(
         default_config.allowed_hosts.clone(),
@@ -36,12 +41,16 @@ pub fn router(db: DatabaseConnection) -> Router {
     http_config.json_response = true;
 
     let streamable = StreamableHttpService::new(
-        move || Ok(HealthieMcp::new(db.clone())),
+        move || Ok(HealthieMcp::new(handler_db.clone())),
         // Required by the constructor; unused when stateful_mode is false.
         Arc::new(LocalSessionManager::default()),
         http_config,
     );
-    Router::new().fallback_service(streamable)
+    Router::new()
+        .fallback_service(streamable)
+        // Auth wraps EVERYTHING that could reach rmcp (including the Host
+        // allowlist check inside the service).
+        .layer(middleware::from_fn_with_state(db, auth::require_mcp_token))
 }
 
 /// Append operator hosts from the env var to rmcp's own localhost defaults —
