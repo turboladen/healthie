@@ -1,0 +1,67 @@
+// dprint config — the catch-all formatter for everything that isn't owned by a
+// native tool (chorez/kammerz cross-repo model).
+//
+// Formatting ownership across the repo:
+//   - rustfmt (`cargo +nightly fmt`) → Rust (nightly-only options in rustfmt.toml).
+//   - Prettier                       → deferred until a frontend exists (see Justfile).
+//   - dprint (this file)             → Markdown, JSON/JSONC, TOML, YAML everywhere
+//     else (docs, .github/*.yml, …).
+//
+// The tools' file sets are disjoint, so nothing is formatted twice.
+// `just fmt` runs dprint + rustfmt; `just fmt-check` / CI verify both.
+//
+// Run from anywhere in the repo: `dprint fmt` (writes) or `dprint check`
+// (CI gate).
+{
+  // Spaces, width 100 — matches the Rust conventions in this repo.
+  "indentWidth": 2,
+  "useTabs": false,
+  "lineWidth": 100,
+  "newLineKind": "lf",
+
+  "json": {},
+
+  // No "includes": dprint formats every file it has a plugin for, minus the
+  // excludes below.
+  "excludes": [
+    "**/node_modules",
+    "**/target",
+    // Future frontend will be Prettier-owned (kammerz/chorez model).
+    "frontend",
+    // Generated beads export mirror — never hand-formatted.
+    ".beads",
+    // Agent tooling. Some of it IS tracked source (settings.json, hooks/),
+    // but Claude Code rewrites settings.json itself (formatting it invites
+    // churn wars) and worktrees/ holds full throwaway checkouts that dprint
+    // must not traverse. Excluded wholesale, matching chorez/kammerz.
+    ".claude",
+    // AI-agent instruction files with a beads-managed block
+    // (`<!-- BEGIN BEADS INTEGRATION ... hash:… -->`). bd rewrites that block to
+    // its own canonical (blank-line-free) form by hash; letting dprint's markdown
+    // plugin re-add blank lines inside it starts a tug-of-war that reddens CI on
+    // the next `bd` integration sync. Leave these to bd.
+    "CLAUDE.md",
+    "AGENTS.md",
+    // Being retired (specs/plans are distilled into docs/adr/, healthie-19k);
+    // don't churn files scheduled for deletion.
+    "docs/superpowers",
+    // TEMPORARY: the toml plugin reorders keys, which would guarantee merge
+    // conflicts with in-flight branches editing Cargo.toml files. Normalizing
+    // TOML (and removing this exclude) is a filed follow-up; drop it once the
+    // current PR train has merged.
+    "**/Cargo.toml",
+    // Legacy Python-era file, already deleted on an in-flight branch — no point
+    // formatting it here just to conflict with its removal. Remove this exclude
+    // together with the file.
+    "pyproject.toml",
+  ],
+
+  // Plugin versions are pinned. Bump deliberately with `dprint config update`
+  // — this catches behavior changes during review instead of silently in CI.
+  "plugins": [
+    "https://plugins.dprint.dev/json-0.21.3.wasm",
+    "https://plugins.dprint.dev/markdown-0.22.1.wasm",
+    "https://plugins.dprint.dev/toml-0.7.0.wasm",
+    "https://plugins.dprint.dev/g-plane/pretty_yaml-v0.6.0.wasm",
+  ],
+}

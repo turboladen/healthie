@@ -34,17 +34,17 @@ remains an output). The Tauri/XML-parser vision is superseded.
 
 ### Decisions log
 
-| Decision | Choice |
-| --- | --- |
-| Where intelligence lives | Hybrid: pure content store + semantic MCP context tools; a small deterministic rules layer ONLY for safety-critical items (age/sex screening schedules, PT must-do rotation, supplement review dates). All other judgment is Claude's, at conversation time. |
-| Data depth | Curated dailies + episodes. Daily/weekly aggregates for a curated metric list; raw high-resolution series only for flagged episodes. No full Apple Health mirror. |
-| Checkin home | Claude conversation (any surface), scripted by healthie's MCP server; every answer persisted as structured checkin data. |
-| Ingestion | Health Auto Export REST automation POSTs daily JSON to `/ingest/hae`; HAE's MCP server is the gap-fill fallback. Bearer-token auth, idempotent upserts keyed on (metric kind, date), unknown metric kinds quarantined — never silently dropped. |
-| Goal model | Concern → Goal → Protocol chain. Protocols carry a purpose, review-by date, and a permanent outcome verdict + rationale — nothing gets re-suggested blind. |
-| Whose health | Steve only, full model; family illness as lightweight `FamilyEvent` context, queryable but not per-person modeling. |
-| Plan output | Healthie stores each checkin's Plan as source of truth. Plan items are typed; each kind maps to a natural external destination Claude pushes to at the conversation layer: time-bound items → calendar (iCal), discrete actions → a task system, guidance/nutrition direction → stays in healthie. Destinations are pluggable without schema changes. |
-| Build order | Checkin-loop first (see Roadmap below). |
-| Checkin cadence | Cadence-agnostic: a checkin covers "since the last checkin." No assumption of weekly. |
+| Decision                 | Choice                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Where intelligence lives | Hybrid: pure content store + semantic MCP context tools; a small deterministic rules layer ONLY for safety-critical items (age/sex screening schedules, PT must-do rotation, supplement review dates). All other judgment is Claude's, at conversation time.                                                                                          |
+| Data depth               | Curated dailies + episodes. Daily/weekly aggregates for a curated metric list; raw high-resolution series only for flagged episodes. No full Apple Health mirror.                                                                                                                                                                                     |
+| Checkin home             | Claude conversation (any surface), scripted by healthie's MCP server; every answer persisted as structured checkin data.                                                                                                                                                                                                                              |
+| Ingestion                | Health Auto Export REST automation POSTs daily JSON to `/ingest/hae`; HAE's MCP server is the gap-fill fallback. Bearer-token auth, idempotent upserts keyed on (metric kind, date), unknown metric kinds quarantined — never silently dropped.                                                                                                       |
+| Goal model               | Concern → Goal → Protocol chain. Protocols carry a purpose, review-by date, and a permanent outcome verdict + rationale — nothing gets re-suggested blind.                                                                                                                                                                                            |
+| Whose health             | Steve only, full model; family illness as lightweight `FamilyEvent` context, queryable but not per-person modeling.                                                                                                                                                                                                                                   |
+| Plan output              | Healthie stores each checkin's Plan as source of truth. Plan items are typed; each kind maps to a natural external destination Claude pushes to at the conversation layer: time-bound items → calendar (iCal), discrete actions → a task system, guidance/nutrition direction → stays in healthie. Destinations are pluggable without schema changes. |
+| Build order              | Checkin-loop first (see Roadmap below).                                                                                                                                                                                                                                                                                                               |
+| Checkin cadence          | Cadence-agnostic: a checkin covers "since the last checkin." No assumption of weekly.                                                                                                                                                                                                                                                                 |
 
 ### Architecture
 
@@ -117,7 +117,7 @@ pipeline) once ≥3 apps share the shape.
   outcomes — fixing precisely what made the predecessor experiment fluffy. Protocol
   verdicts are permanently on file; the next briefing opens with "here's what you
   committed to — what actually happened?"
-- **Positive:** the briefing assembler is the highest-value test target — it *is*
+- **Positive:** the briefing assembler is the highest-value test target — it _is_
   the product — alongside table-driven rules tests, golden-file ingest tests, and
   MCP integration tests on temp SQLite.
 - **Negative / limits:** single-user by design; the curated-metrics choice means

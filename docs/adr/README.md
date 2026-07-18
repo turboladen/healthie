@@ -47,7 +47,7 @@ it's an ADR.
 
 ## Index
 
-| ADR                                             | Status   | Decision                                                       |
-| ----------------------------------------------- | -------- | -------------------------------------------------------------- |
-| [0001](0001-record-architecture-decisions.md)   | Accepted | Adopt ADRs as the durable decision record                      |
-| [0002](0002-personal-domain-pattern-rebuild.md) | Accepted | Rebuild on the personal-domain pattern: checkin loop first     |
+| ADR                                             | Status   | Decision                                                   |
+| ----------------------------------------------- | -------- | ---------------------------------------------------------- |
+| [0001](0001-record-architecture-decisions.md)   | Accepted | Adopt ADRs as the durable decision record                  |
+| [0002](0002-personal-domain-pattern-rebuild.md) | Accepted | Rebuild on the personal-domain pattern: checkin loop first |

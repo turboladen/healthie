@@ -1,0 +1,12 @@
+# Commits to skip in `git blame` — bulk mechanical reformats only.
+#
+# Add the full 40-char SHA of any repo-wide reformat commit here (one per line)
+# so blame keeps pointing at the change that introduced the code, not the
+# reformat. Then blame respects it via:
+#
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# (GitHub's blame view picks this file up automatically by its name.)
+#
+# No entries yet — the first repo-wide `dprint fmt` / TOML-normalization commit
+# goes here when it lands.
