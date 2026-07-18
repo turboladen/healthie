@@ -22,10 +22,15 @@ ci-backend:
     cargo test --workspace --locked
     cargo clippy --workspace --all-targets --locked -- -D warnings -D clippy::pedantic
 
+# Spell-check via typos-cli (brew install typos-cli). Skips with a warning when
+# not installed locally; CI's `typos` job installs it and enforces hard.
+typos:
+    @if command -v typos >/dev/null; then typos; else echo "⚠️  typos-cli not installed — skipping (CI enforces)"; fi
+
 # Local mirror of the CI gates that can run anywhere (format + backend); the
 # aarch64 cross-check job is CI-only (needs the Linux cross toolchain), so
 # local green does not guarantee that job. The ci-before-push hook
 # (.claude/hooks/ci-before-push.sh) runs this before any `git push` /
 # `gh pr create`.
-ci: fmt-check ci-backend
-    @echo "✅ just ci: local CI gates passed (format, backend; aarch64 check is CI-only)"
+ci: fmt-check ci-backend typos
+    @echo "✅ just ci: local CI gates passed (format, backend, typos; aarch64 check is CI-only)"

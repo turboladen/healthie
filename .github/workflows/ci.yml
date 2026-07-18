@@ -96,6 +96,19 @@ jobs:
           tool: just
       - run: just ci-backend
 
+  # Spell-check → `typos` (fewd precedent). Hard gate here; the local `just
+  # typos` recipe soft-skips when typos-cli isn't installed.
+  typos:
+    name: typos (spell-check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: typos
+      - run: typos
+
   # The eventual deploy target is aarch64 Linux; without this gate, a
   # dependency that breaks on aarch64 surfaces at deploy time instead of in
   # review. `cargo check` (not a full build) compiles every dependency and
@@ -129,7 +142,7 @@ jobs:
   # rename/condition without touching the protection rule.
   all-checks:
     name: all-checks
-    needs: [changes, format, backend, aarch64-cross-check]
+    needs: [changes, format, backend, typos, aarch64-cross-check]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
