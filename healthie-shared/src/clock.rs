@@ -1,9 +1,13 @@
-/// UTC timestamp string, the canonical DB format.
-pub fn now_str() -> String {
-    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+use chrono::{DateTime, NaiveDate, Utc};
+
+/// Current UTC instant, the canonical DB timestamp value.
+#[must_use]
+pub fn now() -> DateTime<Utc> {
+    Utc::now()
 }
 
-/// UTC date string `YYYY-MM-DD`.
-pub fn today_str() -> String {
-    chrono::Utc::now().format("%Y-%m-%d").to_string()
+/// Today's UTC date.
+#[must_use]
+pub fn today() -> NaiveDate {
+    now().date_naive()
 }

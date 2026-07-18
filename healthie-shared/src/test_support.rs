@@ -1,9 +1,37 @@
+use chrono::{DateTime, NaiveDate, Utc};
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 
 use crate::migration::Migrator;
 
+/// Parse a `YYYY-MM-DD` string into a typed `NaiveDate` for test seeds/asserts.
+///
+/// All datetime writers go through the sqlx `DateTime<Utc>` encoder; this helper
+/// keeps tests on typed values rather than raw strings.
+///
+/// # Panics
+/// Panics if `s` is not a valid `YYYY-MM-DD` date.
+#[must_use]
+pub fn date(s: &str) -> NaiveDate {
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").expect("valid YYYY-MM-DD date literal")
+}
+
+/// Parse a `YYYY-MM-DD HH:MM:SS` string into a UTC `DateTime` for test
+/// seeds/asserts.
+///
+/// # Panics
+/// Panics if `s` is not a valid `YYYY-MM-DD HH:MM:SS` datetime.
+#[must_use]
+pub fn datetime(s: &str) -> DateTime<Utc> {
+    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+        .expect("valid YYYY-MM-DD HH:MM:SS datetime literal")
+        .and_utc()
+}
+
 /// In-memory `SQLite`, single pinned connection, fully migrated.
+///
+/// # Panics
+/// Panics if the in-memory database cannot be opened or the migrations fail.
 pub async fn test_db() -> DatabaseConnection {
     let mut opt = ConnectOptions::new("sqlite::memory:");
     opt.max_connections(1)
@@ -51,7 +79,9 @@ mod tests {
     async fn entities_match_schema() {
         use sea_orm::EntityTrait;
         let db = super::test_db().await;
-        // A find() per entity proves column names/types line up with the migration.
+        // A find() per entity decodes zero rows from empty tables: it proves the
+        // column names/types line up with the migration, not value round-trips —
+        // those are covered by the per-service insert-then-read tests.
         crate::entities::profile::Entity::find()
             .all(&db)
             .await

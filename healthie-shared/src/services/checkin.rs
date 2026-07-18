@@ -1,15 +1,21 @@
+use chrono::NaiveTime;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
     QueryOrder,
 };
 
 use crate::{
-    clock::{now_str, today_str},
+    clock::{now, today},
     entities::{checkin, checkin_response},
     error::{DomainError, DomainResult},
     services::concern,
 };
 
+/// Loads a checkin by id.
+///
+/// # Errors
+/// `DomainError::NotFound` if no checkin has id `id`; `DomainError::Db` on
+/// database failure.
 pub async fn require(db: &impl ConnectionTrait, id: i32) -> DomainResult<checkin::Model> {
     checkin::Entity::find_by_id(id)
         .one(db)
@@ -18,26 +24,36 @@ pub async fn require(db: &impl ConnectionTrait, id: i32) -> DomainResult<checkin
 }
 
 /// Opens today's checkin, or resumes an incomplete one started today.
+///
+/// # Errors
+/// `DomainError::Db` on database failure.
 pub async fn start(db: &impl ConnectionTrait) -> DomainResult<checkin::Model> {
-    let today = today_str();
+    let day_start = today().and_time(NaiveTime::MIN).and_utc();
     let open = checkin::Entity::find()
         .filter(checkin::Column::CompletedAt.is_null())
-        .filter(checkin::Column::StartedAt.gte(format!("{today} 00:00:00")))
+        .filter(checkin::Column::StartedAt.gte(day_start))
         .one(db)
         .await?;
     if let Some(existing) = open {
         return Ok(existing);
     }
     Ok(checkin::ActiveModel {
-        started_at: Set(now_str()),
-        created_at: Set(now_str()),
-        updated_at: Set(now_str()),
+        started_at: Set(now()),
+        created_at: Set(now()),
+        updated_at: Set(now()),
         ..Default::default()
     }
     .insert(db)
     .await?)
 }
 
+/// Appends a question/answer to an open checkin.
+///
+/// # Errors
+/// `DomainError::NotFound` if `checkin_id` or `concern_id` refers to no such
+/// record; `DomainError::BadRequest` if the checkin is already completed;
+/// `DomainError::Invalid` if `answer` is empty; `DomainError::Db` on database
+/// failure.
 pub async fn record_response(
     db: &impl ConnectionTrait,
     checkin_id: i32,
@@ -62,14 +78,20 @@ pub async fn record_response(
         question: Set(question.to_string()),
         answer: Set(answer.to_string()),
         concern_id: Set(concern_id),
-        created_at: Set(now_str()),
-        updated_at: Set(now_str()),
+        created_at: Set(now()),
+        updated_at: Set(now()),
         ..Default::default()
     }
     .insert(db)
     .await?)
 }
 
+/// Completes a checkin with a summary.
+///
+/// # Errors
+/// `DomainError::NotFound` if no checkin has id `checkin_id`;
+/// `DomainError::BadRequest` if it is already completed; `DomainError::Db` on
+/// database failure.
 pub async fn complete(
     db: &impl ConnectionTrait,
     checkin_id: i32,
@@ -82,12 +104,16 @@ pub async fn complete(
         )));
     }
     let mut active: checkin::ActiveModel = ck.into();
-    active.completed_at = Set(Some(now_str()));
+    active.completed_at = Set(Some(now()));
     active.summary = Set(Some(summary.to_string()));
-    active.updated_at = Set(now_str());
+    active.updated_at = Set(now());
     Ok(active.update(db).await?)
 }
 
+/// Returns the most recently completed checkin with its responses, if any.
+///
+/// # Errors
+/// `DomainError::Db` on database failure.
 pub async fn latest_completed(
     db: &impl ConnectionTrait,
 ) -> DomainResult<Option<(checkin::Model, Vec<checkin_response::Model>)>> {

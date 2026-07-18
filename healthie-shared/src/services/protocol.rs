@@ -4,23 +4,18 @@ use sea_orm::{
 };
 
 use crate::{
-    clock::{now_str, today_str},
+    clock::{now, today},
     entities::protocol,
     error::{DomainError, DomainResult},
     inputs::protocol::{NewProtocol, ProtocolOutcome},
     services::{concern, goal},
 };
 
-pub const VALID_KINDS: [&str; 6] = [
-    "diet",
-    "exercise",
-    "supplement",
-    "therapy",
-    "screening",
-    "habit",
-];
-pub const VALID_VERDICTS: [&str; 4] = ["worked", "didnt-work", "mixed", "inconclusive"];
-
+/// Loads a protocol by id.
+///
+/// # Errors
+/// `DomainError::NotFound` if no protocol has id `id`; `DomainError::Db` on
+/// database failure.
 pub async fn require(db: &impl ConnectionTrait, id: i32) -> DomainResult<protocol::Model> {
     protocol::Entity::find_by_id(id)
         .one(db)
@@ -28,16 +23,15 @@ pub async fn require(db: &impl ConnectionTrait, id: i32) -> DomainResult<protoco
         .ok_or_else(|| DomainError::NotFound(format!("Protocol {id} not found")))
 }
 
+/// Starts a protocol, optionally linked to a concern and/or goal.
+///
+/// # Errors
+/// `DomainError::Invalid` if `name` is empty; `DomainError::NotFound` if
+/// `concern_id` or `goal_id` refers to no such record; `DomainError::Db` on
+/// database failure.
 pub async fn start(db: &impl ConnectionTrait, input: NewProtocol) -> DomainResult<protocol::Model> {
     if input.name.trim().is_empty() {
         return Err(DomainError::invalid("name", "must not be empty"));
-    }
-    if !VALID_KINDS.contains(&input.kind.as_str()) {
-        return Err(DomainError::BadRequest(format!(
-            "Invalid kind '{}'. Must be one of: {}",
-            input.kind,
-            VALID_KINDS.join(", ")
-        )));
     }
     if let Some(cid) = input.concern_id {
         concern::require(db, cid).await?;
@@ -52,28 +46,27 @@ pub async fn start(db: &impl ConnectionTrait, input: NewProtocol) -> DomainResul
         kind: Set(input.kind),
         purpose: Set(input.purpose),
         schedule: Set(input.schedule),
-        started_on: Set(input.started_on.unwrap_or_else(today_str)),
+        started_on: Set(input.started_on.unwrap_or_else(today)),
         review_by: Set(input.review_by),
-        created_at: Set(now_str()),
-        updated_at: Set(now_str()),
+        created_at: Set(now()),
+        updated_at: Set(now()),
         ..Default::default()
     }
     .insert(db)
     .await?)
 }
 
+/// Records a protocol's final verdict, ending it.
+///
+/// # Errors
+/// `DomainError::Invalid` if `rationale` is empty; `DomainError::NotFound` if no
+/// protocol has id `id`; `DomainError::BadRequest` if the protocol already has a
+/// verdict; `DomainError::Db` on database failure.
 pub async fn record_outcome(
     db: &impl ConnectionTrait,
     id: i32,
     outcome: ProtocolOutcome,
 ) -> DomainResult<protocol::Model> {
-    if !VALID_VERDICTS.contains(&outcome.verdict.as_str()) {
-        return Err(DomainError::BadRequest(format!(
-            "Invalid verdict '{}'. Must be one of: {}",
-            outcome.verdict,
-            VALID_VERDICTS.join(", ")
-        )));
-    }
     if outcome.rationale.trim().is_empty() {
         return Err(DomainError::invalid(
             "rationale",
@@ -90,11 +83,15 @@ pub async fn record_outcome(
     let mut active: protocol::ActiveModel = existing.into();
     active.verdict = Set(Some(outcome.verdict));
     active.verdict_rationale = Set(Some(outcome.rationale));
-    active.ended_on = Set(Some(outcome.ended_on.unwrap_or_else(today_str)));
-    active.updated_at = Set(now_str());
+    active.ended_on = Set(Some(outcome.ended_on.unwrap_or_else(today)));
+    active.updated_at = Set(now());
     Ok(active.update(db).await?)
 }
 
+/// Lists protocols that have not yet ended.
+///
+/// # Errors
+/// `DomainError::Db` on database failure.
 pub async fn list_active(db: &impl ConnectionTrait) -> DomainResult<Vec<protocol::Model>> {
     Ok(protocol::Entity::find()
         .filter(protocol::Column::EndedOn.is_null())
@@ -103,6 +100,10 @@ pub async fn list_active(db: &impl ConnectionTrait) -> DomainResult<Vec<protocol
         .await?)
 }
 
+/// Lists every protocol, most recently started first.
+///
+/// # Errors
+/// `DomainError::Db` on database failure.
 pub async fn history(db: &impl ConnectionTrait) -> DomainResult<Vec<protocol::Model>> {
     Ok(protocol::Entity::find()
         .order_by_desc(protocol::Column::StartedOn)
@@ -114,7 +115,10 @@ pub async fn history(db: &impl ConnectionTrait) -> DomainResult<Vec<protocol::Mo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_db;
+    use crate::{
+        entities::protocol::{ProtocolKind, ProtocolVerdict},
+        test_support::{date, test_db},
+    };
 
     async fn keto(db: &sea_orm::DatabaseConnection) -> protocol::Model {
         start(
@@ -123,35 +127,15 @@ mod tests {
                 concern_id: None,
                 goal_id: None,
                 name: "Keto diet".into(),
-                kind: "diet".into(),
+                kind: ProtocolKind::Diet,
                 purpose: Some("lose weight".into()),
                 schedule: None,
-                started_on: Some("2026-05-01".into()),
+                started_on: Some(date("2026-05-01")),
                 review_by: None,
             },
         )
         .await
         .unwrap()
-    }
-
-    #[tokio::test]
-    async fn start_rejects_unknown_kind() {
-        let db = test_db().await;
-        let res = start(
-            &db,
-            NewProtocol {
-                concern_id: None,
-                goal_id: None,
-                name: "X".into(),
-                kind: "regimen".into(),
-                purpose: None,
-                schedule: None,
-                started_on: None,
-                review_by: None,
-            },
-        )
-        .await;
-        assert!(matches!(res, Err(DomainError::BadRequest(_))));
     }
 
     #[tokio::test]
@@ -163,7 +147,7 @@ mod tests {
                 &db,
                 p.id,
                 ProtocolOutcome {
-                    verdict: "mixed".into(),
+                    verdict: ProtocolVerdict::Mixed,
                     rationale: "  ".into(),
                     ended_on: None,
                 }
@@ -175,7 +159,7 @@ mod tests {
             &db,
             p.id,
             ProtocolOutcome {
-                verdict: "mixed".into(),
+                verdict: ProtocolVerdict::Mixed,
                 rationale: "weight down but LDL up".into(),
                 ended_on: None,
             },
@@ -183,7 +167,7 @@ mod tests {
         .await
         .unwrap();
         assert!(done.ended_on.is_some());
-        assert_eq!(done.verdict.as_deref(), Some("mixed"));
+        assert_eq!(done.verdict, Some(ProtocolVerdict::Mixed));
         assert!(list_active(&db).await.unwrap().is_empty());
         assert_eq!(history(&db).await.unwrap().len(), 1);
     }
@@ -193,7 +177,7 @@ mod tests {
         let db = test_db().await;
         let p = keto(&db).await;
         let outcome = ProtocolOutcome {
-            verdict: "worked".into(),
+            verdict: ProtocolVerdict::Worked,
             rationale: "fine".into(),
             ended_on: None,
         };

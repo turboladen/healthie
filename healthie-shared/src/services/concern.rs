@@ -7,44 +7,26 @@ use sea_orm::{
 use serde::Serialize;
 
 use crate::{
-    clock::{now_str, today_str},
-    entities::{concern, concern_tag},
+    clock::{now, today},
+    entities::{
+        concern::{self, ConcernStatus},
+        concern_tag::{self, ConcernTag},
+    },
     error::{DomainError, DomainResult},
     inputs::concern::NewConcern,
 };
 
-pub const VALID_STATUSES: [&str; 3] = ["active", "monitoring", "resolved"];
-pub const VALID_TAGS: [&str; 10] = [
-    "musculoskeletal",
-    "neurological",
-    "mental-health",
-    "cardiovascular",
-    "metabolic",
-    "nutrition",
-    "preventive",
-    "immune",
-    "sleep",
-    "general",
-];
-
 #[derive(Debug, Serialize)]
 pub struct ConcernWithTags {
     pub concern: concern::Model,
-    pub tags: Vec<String>,
+    pub tags: Vec<ConcernTag>,
 }
 
-fn validate_tags(tags: &[String]) -> DomainResult<()> {
-    for tag in tags {
-        if !VALID_TAGS.contains(&tag.as_str()) {
-            return Err(DomainError::BadRequest(format!(
-                "Invalid tag '{tag}'. Must be one of: {}",
-                VALID_TAGS.join(", ")
-            )));
-        }
-    }
-    Ok(())
-}
-
+/// Loads a concern by id.
+///
+/// # Errors
+/// `DomainError::NotFound` if no concern has id `id`; `DomainError::Db` on
+/// database failure.
 pub async fn require(db: &impl ConnectionTrait, id: i32) -> DomainResult<concern::Model> {
     concern::Entity::find_by_id(id)
         .one(db)
@@ -52,6 +34,11 @@ pub async fn require(db: &impl ConnectionTrait, id: i32) -> DomainResult<concern
         .ok_or_else(|| DomainError::NotFound(format!("Concern {id} not found")))
 }
 
+/// Opens a new concern with its (deduplicated) tags in one transaction.
+///
+/// # Errors
+/// `DomainError::Invalid` if `name` is empty; `DomainError::Db` on database
+/// failure.
 pub async fn open<C: ConnectionTrait + TransactionTrait>(
     db: &C,
     input: NewConcern,
@@ -61,24 +48,23 @@ pub async fn open<C: ConnectionTrait + TransactionTrait>(
     }
     // Dedupe order-preserving, first-wins: the (concern_id, tag) unique index
     // rejects duplicates, so silently collapse them rather than fail the insert.
-    let mut tags: Vec<String> = Vec::new();
+    let mut tags: Vec<ConcernTag> = Vec::new();
     for tag in input.tags {
         if !tags.contains(&tag) {
             tags.push(tag);
         }
     }
-    validate_tags(&tags)?;
 
     // concern + tags are one unit of work: a mid-loop failure must not leave a
     // persisted concern with only some of its tags.
     let txn = db.begin().await?;
     let model = concern::ActiveModel {
         name: Set(input.name),
-        status: Set("active".into()),
+        status: Set(ConcernStatus::Active),
         narrative: Set(input.narrative),
-        opened_on: Set(input.opened_on.unwrap_or_else(today_str)),
-        created_at: Set(now_str()),
-        updated_at: Set(now_str()),
+        opened_on: Set(input.opened_on.unwrap_or_else(today)),
+        created_at: Set(now()),
+        updated_at: Set(now()),
         ..Default::default()
     }
     .insert(&txn)
@@ -86,9 +72,9 @@ pub async fn open<C: ConnectionTrait + TransactionTrait>(
     for tag in &tags {
         concern_tag::ActiveModel {
             concern_id: Set(model.id),
-            tag: Set(tag.clone()),
-            created_at: Set(now_str()),
-            updated_at: Set(now_str()),
+            tag: Set(*tag),
+            created_at: Set(now()),
+            updated_at: Set(now()),
             ..Default::default()
         }
         .insert(&txn)
@@ -101,43 +87,47 @@ pub async fn open<C: ConnectionTrait + TransactionTrait>(
     })
 }
 
+/// Sets a concern's status, optionally appending a dated note to its narrative.
+/// Resolving stamps `resolved_on`; any other status clears it.
+///
+/// # Errors
+/// `DomainError::NotFound` if no concern has id `id`; `DomainError::Db` on
+/// database failure.
 pub async fn update_status(
     db: &impl ConnectionTrait,
     id: i32,
-    status: &str,
+    status: ConcernStatus,
     note: Option<String>,
 ) -> DomainResult<concern::Model> {
-    if !VALID_STATUSES.contains(&status) {
-        return Err(DomainError::BadRequest(format!(
-            "Invalid status '{status}'. Must be one of: {}",
-            VALID_STATUSES.join(", ")
-        )));
-    }
     let existing = require(db, id).await?;
     let mut narrative = existing.narrative.clone().unwrap_or_default();
     if let Some(note) = note {
         if !narrative.is_empty() {
             narrative.push('\n');
         }
-        let _ = write!(narrative, "[{}] {note}", today_str());
+        let _ = write!(narrative, "[{}] {note}", today());
     }
     let mut active: concern::ActiveModel = existing.into();
-    active.status = Set(status.to_string());
+    active.status = Set(status);
     active.narrative = Set(if narrative.is_empty() {
         None
     } else {
         Some(narrative)
     });
-    active.resolved_on = Set(if status == "resolved" {
-        Some(today_str())
+    active.resolved_on = Set(if status == ConcernStatus::Resolved {
+        Some(today())
     } else {
         None
     });
-    active.updated_at = Set(now_str());
+    active.updated_at = Set(now());
     Ok(active.update(db).await?)
 }
 
-pub async fn tags_for(db: &impl ConnectionTrait, concern_id: i32) -> DomainResult<Vec<String>> {
+/// Returns a concern's tags in insertion order.
+///
+/// # Errors
+/// `DomainError::Db` on database failure.
+pub async fn tags_for(db: &impl ConnectionTrait, concern_id: i32) -> DomainResult<Vec<ConcernTag>> {
     Ok(concern_tag::Entity::find()
         .filter(concern_tag::Column::ConcernId.eq(concern_id))
         .order_by_asc(concern_tag::Column::Id)
@@ -148,9 +138,13 @@ pub async fn tags_for(db: &impl ConnectionTrait, concern_id: i32) -> DomainResul
         .collect())
 }
 
+/// Lists every non-resolved concern with its tags.
+///
+/// # Errors
+/// `DomainError::Db` on database failure.
 pub async fn list_active(db: &impl ConnectionTrait) -> DomainResult<Vec<ConcernWithTags>> {
     let concerns = concern::Entity::find()
-        .filter(concern::Column::Status.ne("resolved"))
+        .filter(concern::Column::Status.ne(ConcernStatus::Resolved))
         .order_by_asc(concern::Column::Id)
         .all(db)
         .await?;
@@ -173,7 +167,7 @@ mod tests {
             NewConcern {
                 name: "Bad back".into(),
                 narrative: Some("L4/L5 disc".into()),
-                tags: vec!["musculoskeletal".into(), "neurological".into()],
+                tags: vec![ConcernTag::Musculoskeletal, ConcernTag::Neurological],
                 opened_on: None,
             },
         )
@@ -185,8 +179,11 @@ mod tests {
     async fn open_stores_concern_with_tags() {
         let db = test_db().await;
         let c = seed(&db).await;
-        assert_eq!(c.concern.status, "active");
-        assert_eq!(c.tags, vec!["musculoskeletal", "neurological"]);
+        assert_eq!(c.concern.status, ConcernStatus::Active);
+        assert_eq!(
+            c.tags,
+            vec![ConcernTag::Musculoskeletal, ConcernTag::Neurological]
+        );
     }
 
     #[tokio::test]
@@ -198,60 +195,50 @@ mod tests {
                 name: "Bad back".into(),
                 narrative: None,
                 tags: vec![
-                    "musculoskeletal".into(),
-                    "musculoskeletal".into(),
-                    "neurological".into(),
+                    ConcernTag::Musculoskeletal,
+                    ConcernTag::Musculoskeletal,
+                    ConcernTag::Neurological,
                 ],
                 opened_on: None,
             },
         )
         .await
         .unwrap();
-        assert_eq!(c.tags, vec!["musculoskeletal", "neurological"]);
+        assert_eq!(
+            c.tags,
+            vec![ConcernTag::Musculoskeletal, ConcernTag::Neurological]
+        );
         // stored once, not once per duplicate
         let reloaded = tags_for(&db, c.concern.id).await.unwrap();
-        assert_eq!(reloaded, vec!["musculoskeletal", "neurological"]);
-    }
-
-    #[tokio::test]
-    async fn open_rejects_unknown_tag() {
-        let db = test_db().await;
-        let res = open(
-            &db,
-            NewConcern {
-                name: "X".into(),
-                narrative: None,
-                tags: vec!["chiropractics".into()],
-                opened_on: None,
-            },
-        )
-        .await;
-        assert!(matches!(res, Err(DomainError::BadRequest(_))));
+        assert_eq!(
+            reloaded,
+            vec![ConcernTag::Musculoskeletal, ConcernTag::Neurological]
+        );
     }
 
     #[tokio::test]
     async fn update_status_resolves_and_appends_note() {
         let db = test_db().await;
         let c = seed(&db).await;
-        let updated = update_status(&db, c.concern.id, "resolved", Some("PT finished".into()))
-            .await
-            .unwrap();
-        assert_eq!(updated.status, "resolved");
+        let updated = update_status(
+            &db,
+            c.concern.id,
+            ConcernStatus::Resolved,
+            Some("PT finished".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.status, ConcernStatus::Resolved);
         assert!(updated.resolved_on.is_some());
         assert!(updated.narrative.unwrap().contains("PT finished"));
         assert!(list_active(&db).await.unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn update_status_rejects_unknown_status_and_missing_id() {
+    async fn update_status_rejects_missing_id() {
         let db = test_db().await;
-        let c = seed(&db).await;
         assert!(matches!(
-            update_status(&db, c.concern.id, "cured", None).await,
-            Err(DomainError::BadRequest(_))
-        ));
-        assert!(matches!(
-            update_status(&db, 999, "active", None).await,
+            update_status(&db, 999, ConcernStatus::Active, None).await,
             Err(DomainError::NotFound(_))
         ));
     }

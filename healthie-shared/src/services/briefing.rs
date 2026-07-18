@@ -1,3 +1,4 @@
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use sea_orm::ConnectionTrait;
 use serde::Serialize;
 
@@ -13,7 +14,7 @@ use crate::{
 #[derive(Debug, Serialize)]
 pub struct LastCheckin {
     pub summary: Option<String>,
-    pub completed_at: String,
+    pub completed_at: DateTime<Utc>,
     pub responses: Vec<checkin_response::Model>,
 }
 
@@ -25,7 +26,7 @@ pub struct ProtocolBrief {
 
 #[derive(Debug, Serialize)]
 pub struct Briefing {
-    pub generated_on: String,
+    pub generated_on: NaiveDate,
     pub profile: Option<profile::Model>,
     pub days_since_last_checkin: Option<i64>,
     pub cadence_note: Option<String>,
@@ -38,43 +39,28 @@ pub struct Briefing {
     pub recent_observations: Vec<observation::Model>,
 }
 
-fn date_part(datetime: &str) -> &str {
-    datetime.split(' ').next().unwrap_or(datetime)
-}
-
-fn days_between(earlier: &str, later: &str) -> Option<i64> {
-    let a = chrono::NaiveDate::parse_from_str(earlier, "%Y-%m-%d").ok()?;
-    let b = chrono::NaiveDate::parse_from_str(later, "%Y-%m-%d").ok()?;
-    Some((b - a).num_days())
-}
-
-pub async fn assemble(db: &impl ConnectionTrait, today: &str) -> DomainResult<Briefing> {
+/// Assembles the full daily briefing as of `today`.
+///
+/// # Errors
+/// `DomainError::Db` on database failure in any of the underlying queries.
+pub async fn assemble(db: &impl ConnectionTrait, today: NaiveDate) -> DomainResult<Briefing> {
     let last = checkin::latest_completed(db).await?;
     let (last_checkin, days_since, since_window) = if let Some((ck, responses)) = last {
-        let completed_at = ck
-            .completed_at
-            .clone()
-            .unwrap_or_else(|| ck.started_at.clone());
-        let days = days_between(date_part(&completed_at), today);
-        let window = completed_at.clone();
+        let completed_at = ck.completed_at.unwrap_or(ck.started_at);
+        let days = (today - completed_at.date_naive()).num_days();
         (
             Some(LastCheckin {
                 summary: ck.summary,
                 completed_at,
                 responses,
             }),
-            days,
-            window,
+            Some(days),
+            completed_at,
         )
     } else {
-        let two_weeks_ago = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d").map_or_else(
-            |_| today.to_string(),
-            |d| {
-                (d - chrono::Duration::days(14))
-                    .format("%Y-%m-%d")
-                    .to_string()
-            },
-        );
+        let two_weeks_ago = (today - chrono::Duration::days(14))
+            .and_time(NaiveTime::MIN)
+            .and_utc();
         (None, None, two_weeks_ago)
     };
 
@@ -86,7 +72,7 @@ pub async fn assemble(db: &impl ConnectionTrait, today: &str) -> DomainResult<Br
         .await?
         .into_iter()
         .map(|p| {
-            let overdue_review = p.review_by.as_deref().is_some_and(|r| r < today);
+            let overdue_review = p.review_by.is_some_and(|r| r < today);
             ProtocolBrief {
                 protocol: p,
                 overdue_review,
@@ -95,7 +81,7 @@ pub async fn assemble(db: &impl ConnectionTrait, today: &str) -> DomainResult<Br
         .collect();
 
     Ok(Briefing {
-        generated_on: today.to_string(),
+        generated_on: today,
         profile: profile_svc::get(db).await?,
         days_since_last_checkin: days_since,
         cadence_note,
@@ -105,7 +91,7 @@ pub async fn assemble(db: &impl ConnectionTrait, today: &str) -> DomainResult<Br
         active_goals: goal_svc::list_active(db).await?,
         active_protocols,
         observations_pending_review: observation_svc::pending_review(db).await?,
-        recent_observations: observation_svc::recent(db, &since_window).await?,
+        recent_observations: observation_svc::recent(db, since_window).await?,
     })
 }
 
@@ -113,6 +99,12 @@ pub async fn assemble(db: &impl ConnectionTrait, today: &str) -> DomainResult<Br
 mod tests {
     use super::*;
     use crate::{
+        entities::{
+            concern_tag::ConcernTag,
+            observation::{ObservationKind, ObservationOrigin},
+            plan_item::PlanItemKind,
+            protocol::ProtocolKind,
+        },
         inputs::{
             concern::NewConcern,
             observation::NewObservation,
@@ -120,13 +112,13 @@ mod tests {
             protocol::NewProtocol,
         },
         services::{checkin, concern, observation, plan, protocol},
-        test_support::test_db,
+        test_support::{date, test_db},
     };
 
     #[tokio::test]
     async fn first_ever_briefing_is_empty_but_valid() {
         let db = test_db().await;
-        let b = assemble(&db, "2026-07-16").await.unwrap();
+        let b = assemble(&db, date("2026-07-16")).await.unwrap();
         assert!(b.days_since_last_checkin.is_none());
         assert!(b.previous_plan.is_none());
         assert!(b.active_concerns.is_empty());
@@ -142,7 +134,7 @@ mod tests {
             NewConcern {
                 name: "Bad back".into(),
                 narrative: None,
-                tags: vec!["musculoskeletal".into()],
+                tags: vec![ConcernTag::Musculoskeletal],
                 opened_on: None,
             },
         )
@@ -154,11 +146,11 @@ mod tests {
                 concern_id: Some(c.concern.id),
                 goal_id: None,
                 name: "Magnesium".into(),
-                kind: "supplement".into(),
+                kind: ProtocolKind::Supplement,
                 purpose: None,
                 schedule: None,
                 started_on: None,
-                review_by: Some("2026-07-01".into()), // overdue vs 2026-07-16
+                review_by: Some(date("2026-07-01")), // overdue vs 2026-07-16
             },
         )
         .await
@@ -166,8 +158,8 @@ mod tests {
         observation::log(
             &db,
             NewObservation {
-                origin: "ai".into(),
-                kind: "note".into(),
+                origin: ObservationOrigin::Ai,
+                kind: ObservationKind::Note,
                 body: "HR trending up".into(),
                 severity: None,
                 concern_id: None,
@@ -190,7 +182,7 @@ mod tests {
                 guidance: None,
                 nutrition: None,
                 items: vec![NewPlanItem {
-                    kind: "workout".into(),
+                    kind: PlanItemKind::Workout,
                     title: "PT bird-dogs".into(),
                     detail: None,
                     scheduled_for: None,
@@ -200,9 +192,9 @@ mod tests {
         .await
         .unwrap();
 
-        let b = assemble(&db, "2026-07-16").await.unwrap();
+        let b = assemble(&db, date("2026-07-16")).await.unwrap();
         assert_eq!(b.active_concerns.len(), 1);
-        assert_eq!(b.active_concerns[0].tags, vec!["musculoskeletal"]);
+        assert_eq!(b.active_concerns[0].tags, vec![ConcernTag::Musculoskeletal]);
         assert!(b.active_protocols[0].overdue_review);
         assert_eq!(b.observations_pending_review.len(), 1);
         assert!(b.previous_plan.is_some());
@@ -219,12 +211,8 @@ mod tests {
             .unwrap();
         checkin::complete(&db, ck.id, "ok").await.unwrap();
         // completed today; a briefing dated 30 days out sees a 30-day gap
-        let future = chrono::Utc::now()
-            .checked_add_signed(chrono::Duration::days(30))
-            .unwrap()
-            .format("%Y-%m-%d")
-            .to_string();
-        let b = assemble(&db, &future).await.unwrap();
+        let future = (chrono::Utc::now() + chrono::Duration::days(30)).date_naive();
+        let b = assemble(&db, future).await.unwrap();
         assert!(b.cadence_note.is_some());
     }
 }
