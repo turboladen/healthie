@@ -8,7 +8,7 @@ fn timestamps(t: &mut TableCreateStatement) -> &mut TableCreateStatement {
     // DateTime<Utc> encoder. A `datetime('now')` default would write
     // space-formatted text that sorts before every RFC3339 row we write, so
     // dropping it both removes a format-corruption hazard and makes a forgotten
-    // Set fail fast (NOT NULL violation) instead of silently mis-ordering.
+    // Set fail fast (NOT NULL violation) instead of silently misordering.
     t.col(
         ColumnDef::new(Alias::new("created_at"))
             .timestamp_with_time_zone()
