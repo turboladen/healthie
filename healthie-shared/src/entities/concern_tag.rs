@@ -33,6 +33,30 @@ pub enum ConcernTag {
     #[sea_orm(string_value = "sleep")]
     #[serde(rename = "sleep")]
     Sleep,
+    #[sea_orm(string_value = "respiratory")]
+    #[serde(rename = "respiratory")]
+    Respiratory,
+    #[sea_orm(string_value = "digestive")]
+    #[serde(rename = "digestive")]
+    Digestive,
+    #[sea_orm(string_value = "endocrine")]
+    #[serde(rename = "endocrine")]
+    Endocrine,
+    #[sea_orm(string_value = "dermatologic")]
+    #[serde(rename = "dermatologic")]
+    Dermatologic,
+    #[sea_orm(string_value = "dental")]
+    #[serde(rename = "dental")]
+    Dental,
+    #[sea_orm(string_value = "sensory")]
+    #[serde(rename = "sensory")]
+    Sensory,
+    #[sea_orm(string_value = "fitness")]
+    #[serde(rename = "fitness")]
+    Fitness,
+    #[sea_orm(string_value = "spiritual")]
+    #[serde(rename = "spiritual")]
+    Spiritual,
     #[sea_orm(string_value = "general")]
     #[serde(rename = "general")]
     General,

@@ -20,6 +20,15 @@ pub enum ProtocolKind {
     #[sea_orm(string_value = "screening")]
     #[serde(rename = "screening")]
     Screening,
+    #[sea_orm(string_value = "medication")]
+    #[serde(rename = "medication")]
+    Medication,
+    #[sea_orm(string_value = "immunization")]
+    #[serde(rename = "immunization")]
+    Immunization,
+    #[sea_orm(string_value = "monitoring")]
+    #[serde(rename = "monitoring")]
+    Monitoring,
     #[sea_orm(string_value = "habit")]
     #[serde(rename = "habit")]
     Habit,
