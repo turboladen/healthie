@@ -3,6 +3,7 @@ pub mod checkin_response;
 pub mod concern;
 pub mod concern_tag;
 pub mod goal;
+pub mod mcp_token;
 pub mod observation;
 pub mod plan;
 pub mod plan_item;

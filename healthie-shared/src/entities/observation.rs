@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 /// (greenfield schema, no query filters on `origin`), so diverging it from the
 /// wire value costs nothing while keeping the MCP wire contract byte-identical.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[sea_orm(rs_type = "String", db_type = "Text")]
 pub enum ObservationOrigin {
     #[sea_orm(string_value = "self_reported")]
@@ -27,6 +28,7 @@ pub enum ObservationOrigin {
 /// Whether an observation is a free note or a graded symptom.
 /// `ObservationKind::iter()` enumerates the legal values.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[sea_orm(rs_type = "String", db_type = "Text")]
 pub enum ObservationKind {
     #[sea_orm(string_value = "note")]

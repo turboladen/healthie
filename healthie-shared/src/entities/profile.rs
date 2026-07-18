@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 /// Biological sex, used for reference ranges. `Sex::iter()` enumerates the
 /// legal values (replacing the deleted `VALID_SEXES` const).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[sea_orm(rs_type = "String", db_type = "Text")]
 pub enum Sex {
     #[sea_orm(string_value = "male")]

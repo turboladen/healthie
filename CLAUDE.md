@@ -64,9 +64,13 @@ cargo clippy --workspace --all-targets --locked -- -D warnings -D clippy::pedant
 Personal health system-of-record per `../personal-domain-pattern`; the durable vision
 and decisions live in `docs/adr/` (start with ADR-0002, deviations in ADR-0003+).
 Cargo workspace: `healthie-shared` (SeaORM/SQLite domain lib — entities, migrations,
-services, briefing assembler) is live; `healthie-mcp` (M1b), `healthie-backend` +
-Svelte SPA (M2+) to come. Conventions copied from `../glovebox` except where an ADR
-says otherwise.
+services, briefing assembler) is live; `healthie-mcp` (M1b) is live — an rmcp
+stateless streamable-HTTP server exposing 15 tools, the `healthie://briefing`
+resource, and the `checkin` prompt, gated by bearer-token auth (singleton
+`mcp_token` service). It ships as a library `router()` (M2's `healthie-backend`
+will `nest_service` it) plus a binary (`healthie-mcp serve|token provision|revoke`)
+that hosts it until the backend exists. `healthie-backend` + Svelte SPA (M2+) to
+come. Conventions copied from `../glovebox` except where an ADR says otherwise.
 
 ## Conventions & Patterns
 
@@ -83,8 +87,10 @@ says otherwise.
   typed seed helpers `test_support::{date, datetime}`
 - SeaORM gotcha: never `.save()` with a `Set` PK — it always takes the UPDATE path
   (RecordNotUpdated on first insert); branch `.insert()`/`.update()` explicitly
-- SQLite FKs are declared but INERT (no `PRAGMA foreign_keys=ON` yet — healthie-38x);
-  services self-enforce referential integrity via `require()` — keep doing so
+- SQLite FKs are ENFORCED: `PRAGMA foreign_keys=ON` is explicit on the binary's
+  connection (healthie-mcp main.rs) and in `test_db()` (healthie-38x); services
+  still self-enforce referential integrity via `require()` as the backstop for
+  actionable errors — keep doing so
 - Do NOT commit new `docs/superpowers/` specs/plans — decisions become ADRs in
   `docs/adr/` (immutable once accepted; supersede, don't edit); active plans stay
   untracked on disk

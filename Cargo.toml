@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["healthie-shared"]
+members = ["healthie-shared", "healthie-mcp"]
 
 [workspace.package]
 edition = "2024"
@@ -17,6 +17,18 @@ thiserror = "2"
 anyhow = "1"
 async-trait = "0.1"
 tracing = "0.1"
+# `std` enables password-hash/std -> rand_core/std -> getrandom, which gates
+# `OsRng` (used for CSPRNG token bytes + salt). Keeps rand off the dep list.
+argon2 = { version = "0.5", features = ["std"] }
+base64 = "0.22"
+schemars = { version = "1", features = ["chrono04"] }
+axum = "0.8"
+axum-extra = { version = "0.10", features = ["typed-header"] }
+rmcp = { version = "2.2", features = ["server", "macros", "transport-streamable-http-server", "schemars"] }
+tower = "0.5"
+clap = { version = "4", features = ["derive", "env"] }
+sqlx = { version = "0.8", default-features = false, features = ["sqlite"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [profile.release]
 lto = "thin"

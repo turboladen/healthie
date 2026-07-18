@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 /// `VALID_STATUSES` const. Every domain enum in these entities follows the same
 /// pattern.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[sea_orm(rs_type = "String", db_type = "Text")]
 pub enum ConcernStatus {
     #[sea_orm(string_value = "active")]
@@ -42,3 +43,23 @@ pub struct Model {
 pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
+
+#[cfg(all(test, feature = "schemars"))]
+mod schemars_tests {
+    use super::*;
+
+    /// The advertised schema must carry the serde wire values (kebab-case),
+    /// not the Rust variant names — the MCP surface depends on this.
+    #[test]
+    fn concern_status_schema_uses_wire_values() {
+        let schema = schemars::schema_for!(ConcernStatus);
+        let json = serde_json::to_string(&schema).expect("serialize schema");
+        assert!(json.contains("\"active\""));
+        assert!(json.contains("\"monitoring\""));
+        assert!(json.contains("\"resolved\""));
+        assert!(
+            !json.contains("Resolved"),
+            "Rust variant name leaked into schema"
+        );
+    }
+}

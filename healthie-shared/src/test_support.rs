@@ -36,7 +36,10 @@ pub async fn test_db() -> DatabaseConnection {
     let mut opt = ConnectOptions::new("sqlite::memory:");
     opt.max_connections(1)
         .min_connections(1)
-        .sqlx_logging(false);
+        .sqlx_logging(false)
+        // Explicit, not default-reliant: FKs are declared in the schema and
+        // must be enforced on every connection (healthie-38x).
+        .map_sqlx_sqlite_opts(|o| o.foreign_keys(true));
     let db = Database::connect(opt)
         .await
         .expect("connect in-memory sqlite");
@@ -47,6 +50,27 @@ pub async fn test_db() -> DatabaseConnection {
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Statement};
+
+    /// FKs are declared in the schema but only enforced if the connection has
+    /// `PRAGMA foreign_keys=ON`. Services self-enforce via `require()`, but the
+    /// pragma is the backstop — prove it's live on test connections.
+    #[tokio::test]
+    async fn test_db_enforces_foreign_keys() {
+        let db = super::test_db().await;
+        let result = db
+            .execute(Statement::from_string(
+                db.get_database_backend(),
+                // concern_tags.concern_id -> concerns.id; 9999 doesn't exist.
+                "INSERT INTO concern_tags (concern_id, tag, created_at, updated_at) VALUES (9999, \
+                 'general', '2026-07-17T00:00:00Z', '2026-07-17T00:00:00Z')"
+                    .to_owned(),
+            ))
+            .await;
+        assert!(
+            result.is_err(),
+            "FK violation must be rejected — PRAGMA foreign_keys is not enforced"
+        );
+    }
 
     #[tokio::test]
     async fn migrations_create_all_m1_tables() {

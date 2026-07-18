@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 /// Lifecycle state of a goal. `GoalStatus::iter()` enumerates the legal values.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[sea_orm(rs_type = "String", db_type = "Text")]
 pub enum GoalStatus {
     #[sea_orm(string_value = "active")]
@@ -22,6 +23,7 @@ pub enum GoalStatus {
 /// How a goal's `target_value` should be compared against the metric.
 /// `GoalComparison::iter()` enumerates the legal values.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[sea_orm(rs_type = "String", db_type = "Text")]
 pub enum GoalComparison {
     #[sea_orm(string_value = "at-most")]
