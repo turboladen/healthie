@@ -1,13 +1,6 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv
+# Superpowers specs/plans are transient working artifacts — durable decisions
+# live in docs/adr/; active plans may exist on disk untracked
+docs/superpowers/
 
 # Beads / Dolt files (added by bd init)
 .dolt/
