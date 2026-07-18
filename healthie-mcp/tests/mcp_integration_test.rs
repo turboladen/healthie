@@ -56,7 +56,7 @@ async fn handshake(app: &Router) {
 
 // `Value` by value keeps the call sites ergonomic (`call_tool(n, json!({…}))`);
 // serde_json's `json!` only borrows it, hence the needless-pass-by-value allow.
-#[allow(dead_code, clippy::needless_pass_by_value)] // used from Task 6 on
+#[allow(clippy::needless_pass_by_value)]
 fn call_tool(name: &str, args: Value) -> Value {
     json!({
         "jsonrpc": "2.0", "id": 7, "method": "tools/call",
@@ -65,7 +65,6 @@ fn call_tool(name: &str, args: Value) -> Value {
 }
 
 /// Parse a tools/call response body; returns (`is_error`, first text block).
-#[allow(dead_code)] // used from Task 6 on
 fn tool_result(body: &str) -> (bool, String) {
     let parsed: Value = serde_json::from_str(body).expect("json body");
     let result = parsed
@@ -80,14 +79,12 @@ fn tool_result(body: &str) -> (bool, String) {
 }
 
 /// Successful tool call → payload parsed back from the pretty-JSON text block.
-#[allow(dead_code)] // used from Task 6 on
 fn tool_payload(body: &str) -> Value {
     let (is_error, text) = tool_result(body);
     assert!(!is_error, "tool errored: {text}");
     serde_json::from_str(&text).unwrap_or_else(|_| panic!("payload not JSON: {text}"))
 }
 
-#[allow(dead_code)] // used from Task 7 on
 fn assert_tool_error(body: &str, needle: &str) {
     let (is_error, text) = tool_result(body);
     assert!(is_error, "expected tool error, got success: {text}");
@@ -320,7 +317,158 @@ async fn log_symptom_validates_severity_range() {
 }
 
 #[tokio::test]
-async fn tools_list_responds() {
+async fn full_checkin_loop_start_respond_plan_complete_outcome() {
+    let (app, _db) = setup().await;
+    handshake(&app).await;
+
+    let body = post_rpc(&app, call_tool("start_checkin", json!({}))).await;
+    let checkin_id = tool_payload(&body)["id"].as_i64().expect("checkin id");
+
+    // start_checkin is idempotent within a day — resuming returns the same id.
+    let body = post_rpc(&app, call_tool("start_checkin", json!({}))).await;
+    assert_eq!(tool_payload(&body)["id"].as_i64(), Some(checkin_id));
+
+    for (q, a) in [
+        ("How was sleep since last time?", "Rough — averaging 6h."),
+        (
+            "Any pain flare-ups?",
+            "Shoulder acted up twice after climbing.",
+        ),
+    ] {
+        let body = post_rpc(
+            &app,
+            call_tool(
+                "record_checkin_response",
+                json!({ "checkin_id": checkin_id, "question": q, "answer": a }),
+            ),
+        )
+        .await;
+        assert_eq!(tool_payload(&body)["question"], q);
+    }
+
+    let body = post_rpc(
+        &app,
+        call_tool(
+            "commit_plan",
+            json!({
+                "checkin_id": checkin_id,
+                "guidance": "Protect sleep before volume.",
+                "items": [
+                    { "kind": "workout", "title": "PT shoulder rotation", "scheduled_for": "2026-07-20" },
+                    { "kind": "action", "title": "Book dentist cleaning" }
+                ]
+            }),
+        ),
+    )
+    .await;
+    let plan = tool_payload(&body);
+    let item_id = plan["items"][0]["item"]["id"].as_i64().expect("item id");
+    assert_eq!(plan["items"][1]["item"]["kind"], "action");
+
+    let body = post_rpc(
+        &app,
+        call_tool(
+            "complete_checkin",
+            json!({
+                "checkin_id": checkin_id,
+                "summary": "Sleep-first week; shoulder PT recommitted; dentist booking pending."
+            }),
+        ),
+    )
+    .await;
+    assert!(tool_payload(&body)["completed_at"].is_string());
+
+    // Completing twice is a BadRequest tool error.
+    let body = post_rpc(
+        &app,
+        call_tool(
+            "complete_checkin",
+            json!({ "checkin_id": checkin_id, "summary": "again" }),
+        ),
+    )
+    .await;
+    let (is_error, _) = tool_result(&body);
+    assert!(is_error, "double-complete must be a tool error");
+
+    let body = post_rpc(
+        &app,
+        call_tool(
+            "record_plan_outcome",
+            json!({ "plan_item_id": item_id, "status": "done", "note": "All 3 sessions." }),
+        ),
+    )
+    .await;
+    assert_eq!(tool_payload(&body)["status"], "done");
+
+    // The next briefing opens with the commitments + outcomes on file.
+    let body = post_rpc(&app, call_tool("get_briefing", json!({}))).await;
+    let briefing = tool_payload(&body);
+    assert_eq!(
+        briefing["last_checkin"]["summary"],
+        "Sleep-first week; shoulder PT recommitted; dentist booking pending."
+    );
+    assert_eq!(
+        briefing["previous_plan"]["items"][0]["outcome"]["status"],
+        "done"
+    );
+}
+
+#[tokio::test]
+async fn record_checkin_response_rejects_completed_checkin() {
+    let (app, _db) = setup().await;
+    handshake(&app).await;
+    let body = post_rpc(&app, call_tool("start_checkin", json!({}))).await;
+    let id = tool_payload(&body)["id"].as_i64().expect("id");
+    post_rpc(
+        &app,
+        call_tool(
+            "complete_checkin",
+            json!({ "checkin_id": id, "summary": "quick one" }),
+        ),
+    )
+    .await;
+    let body = post_rpc(
+        &app,
+        call_tool(
+            "record_checkin_response",
+            json!({ "checkin_id": id, "question": "late?", "answer": "too late" }),
+        ),
+    )
+    .await;
+    let (is_error, _) = tool_result(&body);
+    assert!(is_error, "responses after completion must be rejected");
+}
+
+#[tokio::test]
+async fn commit_plan_requires_items() {
+    let (app, _db) = setup().await;
+    handshake(&app).await;
+    let body = post_rpc(&app, call_tool("commit_plan", json!({ "items": [] }))).await;
+    let (is_error, _) = tool_result(&body);
+    assert!(is_error, "empty plan must be rejected");
+}
+
+/// The 15 tools the M1b surface must advertise.
+const EXPECTED_TOOLS: [&str; 15] = [
+    "get_briefing",
+    "start_checkin",
+    "record_checkin_response",
+    "complete_checkin",
+    "commit_plan",
+    "record_plan_outcome",
+    "log_observation",
+    "log_symptom",
+    "open_concern",
+    "update_concern_status",
+    "set_goal",
+    "start_protocol",
+    "record_protocol_outcome",
+    "get_protocol_history",
+    "update_profile",
+];
+
+#[tokio::test]
+async fn tools_list_advertises_all_tools_with_populated_schemas() {
     let (app, _db) = setup().await;
     handshake(&app).await;
     let body = post_rpc(
@@ -328,5 +476,51 @@ async fn tools_list_responds() {
         json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
     )
     .await;
-    assert!(body.contains("\"tools\""), "{body}");
+    let parsed: Value = serde_json::from_str(&body).expect("json body");
+    let tools = parsed["result"]["tools"].as_array().expect("tools array");
+
+    // (2) Every expected tool is registered — catches a macro registration slip.
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    for expected in EXPECTED_TOOLS {
+        assert!(
+            names.contains(&expected),
+            "missing tool {expected}: {names:?}"
+        );
+    }
+    assert_eq!(
+        names.len(),
+        EXPECTED_TOOLS.len(),
+        "unexpected tool count: {names:?}"
+    );
+
+    // (1) An arg-bearing tool must advertise a non-empty inputSchema — guards
+    // the per-tool `input_schema = schema_for_type::<T>()` override footgun.
+    let open_concern = tools
+        .iter()
+        .find(|t| t["name"] == "open_concern")
+        .expect("open_concern present");
+    let properties = open_concern["inputSchema"]["properties"]
+        .as_object()
+        .expect("open_concern inputSchema.properties object");
+    assert!(
+        properties.contains_key("name") && properties.contains_key("tags"),
+        "open_concern schema must expose its fields: {}",
+        open_concern["inputSchema"]
+    );
+    // The tags enum vocabulary must ride straight from the domain type
+    // (schemars feature end-to-end), not a hand-mirrored string list.
+    assert!(
+        body.contains("musculoskeletal"),
+        "ConcernTag vocab must appear in the advertised schema: {body}"
+    );
+
+    // No-argument tools correctly advertise an empty (property-less) schema.
+    let get_briefing = tools
+        .iter()
+        .find(|t| t["name"] == "get_briefing")
+        .expect("get_briefing present");
+    let empty_props = get_briefing["inputSchema"]["properties"]
+        .as_object()
+        .map_or(0, serde_json::Map::len);
+    assert_eq!(empty_props, 0, "EmptyParams tool must have no properties");
 }

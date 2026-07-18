@@ -8,7 +8,7 @@ use std::sync::Arc;
 use healthie_shared::{
     clock,
     error::{DomainError, DomainResult},
-    services::{briefing, concern, goal, observation, profile, protocol},
+    services::{briefing, checkin, concern, goal, observation, plan, profile, protocol},
 };
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -23,7 +23,8 @@ use sea_orm::DatabaseConnection;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::schemas::{
-    EmptyParams, LogObservationInput, LogSymptomInput, OpenConcernInput,
+    CommitPlanInput, CompleteCheckinInput, EmptyParams, LogObservationInput, LogSymptomInput,
+    OpenConcernInput, RecordCheckinResponseInput, RecordPlanOutcomeInput,
     RecordProtocolOutcomeInput, SetGoalInput, StartProtocolInput, UpdateConcernStatusInput,
     UpdateProfileInput,
 };
@@ -201,6 +202,107 @@ impl HealthieMcp {
             Err(e) => return Ok(e),
         };
         domain_result(observation::log(&*self.db, input.into_domain()).await)
+    }
+
+    #[tool(
+        name = "start_checkin",
+        description = "Open (or resume) today's checkin. Idempotent within a day — calling \
+            again returns the same open checkin with nothing lost. Call get_briefing first.",
+        input_schema = rmcp::handler::server::common::schema_for_type::<EmptyParams>()
+    )]
+    async fn start_checkin(
+        &self,
+        params: LenientParameters<EmptyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let EmptyParams {} = match params.into_tool_input("start_checkin") {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+        domain_result(checkin::start(&*self.db).await)
+    }
+
+    #[tool(
+        name = "record_checkin_response",
+        description = "Persist one question/answer exchange of the checkin, as it happens — \
+            not in a batch at the end. Append-only; a dropped conversation stays resumable.",
+        input_schema = rmcp::handler::server::common::schema_for_type::<RecordCheckinResponseInput>()
+    )]
+    async fn record_checkin_response(
+        &self,
+        params: LenientParameters<RecordCheckinResponseInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = match params.into_tool_input("record_checkin_response") {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+        domain_result(
+            checkin::record_response(
+                &*self.db,
+                input.checkin_id,
+                &input.question,
+                &input.answer,
+                input.concern_id,
+            )
+            .await,
+        )
+    }
+
+    #[tool(
+        name = "complete_checkin",
+        description = "Close the checkin with a summary. Write the summary for the NEXT \
+            checkin's opening accountability pass — commitments made, state of play, \
+            anything that must not be forgotten.",
+        input_schema = rmcp::handler::server::common::schema_for_type::<CompleteCheckinInput>()
+    )]
+    async fn complete_checkin(
+        &self,
+        params: LenientParameters<CompleteCheckinInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = match params.into_tool_input("complete_checkin") {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+        domain_result(checkin::complete(&*self.db, input.checkin_id, &input.summary).await)
+    }
+
+    #[tool(
+        name = "commit_plan",
+        description = "Commit the plan agreed in conversation: typed items (workout → \
+            calendar-bound, action → discrete to-do) plus guidance/nutrition direction. \
+            Healthie's copy is the source of truth; push items to external destinations \
+            afterwards at the conversation layer.",
+        input_schema = rmcp::handler::server::common::schema_for_type::<CommitPlanInput>()
+    )]
+    async fn commit_plan(
+        &self,
+        params: LenientParameters<CommitPlanInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = match params.into_tool_input("commit_plan") {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+        domain_result(plan::commit(&*self.db, input.into_domain()).await)
+    }
+
+    #[tool(
+        name = "record_plan_outcome",
+        description = "Record what actually happened to a previous plan item: done / \
+            skipped / partial, with a note for context. The heart of the accountability \
+            loop — do this near the top of every checkin.",
+        input_schema = rmcp::handler::server::common::schema_for_type::<RecordPlanOutcomeInput>()
+    )]
+    async fn record_plan_outcome(
+        &self,
+        params: LenientParameters<RecordPlanOutcomeInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = match params.into_tool_input("record_plan_outcome") {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+        domain_result(
+            plan::record_item_outcome(&*self.db, input.plan_item_id, input.status, input.note)
+                .await,
+        )
     }
 
     #[tool(

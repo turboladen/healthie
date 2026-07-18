@@ -11,6 +11,8 @@ use healthie_shared::{
         concern_tag::ConcernTag,
         goal::GoalComparison,
         observation::{ObservationKind, ObservationOrigin},
+        plan_item::PlanItemKind,
+        plan_item_outcome::OutcomeStatus,
         profile::Sex,
         protocol::{ProtocolKind, ProtocolVerdict},
     },
@@ -18,6 +20,7 @@ use healthie_shared::{
         concern::NewConcern,
         goal::NewGoal,
         observation::NewObservation,
+        plan::{NewPlan, NewPlanItem},
         profile::UpdateProfile,
         protocol::{NewProtocol, ProtocolOutcome},
     },
@@ -233,4 +236,86 @@ impl LogSymptomInput {
             occurred_at: self.occurred_at,
         }
     }
+}
+
+/// One question/answer exchange inside an open checkin. Append-only — a
+/// dropped conversation leaves a valid, resumable partial checkin.
+#[derive(Deserialize, JsonSchema)]
+pub struct RecordCheckinResponseInput {
+    /// From `start_checkin`.
+    pub checkin_id: i32,
+    /// The question as asked.
+    pub question: String,
+    /// The answer as given (summarize faithfully, don't editorialize).
+    pub answer: String,
+    /// Concern this exchange was about, when clearly one.
+    pub concern_id: Option<i32>,
+}
+
+/// Close a checkin with a summary the NEXT checkin's accountability pass will
+/// read aloud.
+#[derive(Deserialize, JsonSchema)]
+pub struct CompleteCheckinInput {
+    pub checkin_id: i32,
+    pub summary: String,
+}
+
+/// A typed plan item. `workout` items are calendar-bound; `action` items are
+/// discrete to-dos; guidance/nutrition live on the plan itself.
+#[derive(Deserialize, JsonSchema)]
+pub struct PlanItemInput {
+    pub kind: PlanItemKind,
+    pub title: String,
+    pub detail: Option<String>,
+    pub scheduled_for: Option<NaiveDate>,
+}
+
+/// Commit the plan agreed in conversation — healthie's copy is the source of
+/// truth; pushing items to calendar/tasks happens at the conversation layer.
+#[derive(Deserialize, JsonSchema)]
+pub struct CommitPlanInput {
+    /// Checkin this plan came out of.
+    pub checkin_id: Option<i32>,
+    /// Defaults to today.
+    pub starts_on: Option<NaiveDate>,
+    /// Defaults to 7.
+    pub horizon_days: Option<i32>,
+    /// Standing guidance for the horizon (not item-shaped).
+    pub guidance: Option<String>,
+    /// Nutrition direction for the horizon.
+    pub nutrition: Option<String>,
+    pub items: Vec<PlanItemInput>,
+}
+
+impl CommitPlanInput {
+    #[must_use]
+    pub fn into_domain(self) -> NewPlan {
+        NewPlan {
+            checkin_id: self.checkin_id,
+            starts_on: self.starts_on,
+            horizon_days: self.horizon_days,
+            guidance: self.guidance,
+            nutrition: self.nutrition,
+            items: self
+                .items
+                .into_iter()
+                .map(|item| NewPlanItem {
+                    kind: item.kind,
+                    title: item.title,
+                    detail: item.detail,
+                    scheduled_for: item.scheduled_for,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// What actually happened to a plan item. Re-recording replaces the outcome.
+#[derive(Deserialize, JsonSchema)]
+pub struct RecordPlanOutcomeInput {
+    /// Plan item id, from the briefing's `previous_plan`.
+    pub plan_item_id: i32,
+    pub status: OutcomeStatus,
+    /// Context: why skipped, how partial, etc.
+    pub note: Option<String>,
 }
