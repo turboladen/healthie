@@ -21,6 +21,7 @@ tracing = "0.1"
 # `OsRng` (used for CSPRNG token bytes + salt). Keeps rand off the dep list.
 argon2 = { version = "0.5", features = ["std"] }
 base64 = "0.22"
+schemars = { version = "1", features = ["chrono04"] }
 
 [profile.release]
 lto = "thin"

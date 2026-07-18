@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 /// Coarse body-system tag on a concern. `ConcernTag::iter()` enumerates the
 /// legal values (replacing the deleted `VALID_TAGS` const).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[sea_orm(rs_type = "String", db_type = "Text")]
 pub enum ConcernTag {
     #[sea_orm(string_value = "musculoskeletal")]

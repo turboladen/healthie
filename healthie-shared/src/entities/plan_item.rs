@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 /// Whether a plan item is a workout or a general action.
 /// `PlanItemKind::iter()` enumerates the legal values.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[sea_orm(rs_type = "String", db_type = "Text")]
 pub enum PlanItemKind {
     #[sea_orm(string_value = "workout")]

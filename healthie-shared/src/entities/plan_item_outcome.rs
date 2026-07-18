@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 /// How a plan item turned out. `OutcomeStatus::iter()` enumerates the legal
 /// values.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[sea_orm(rs_type = "String", db_type = "Text")]
 pub enum OutcomeStatus {
     #[sea_orm(string_value = "done")]
