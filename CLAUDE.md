@@ -87,8 +87,10 @@ come. Conventions copied from `../glovebox` except where an ADR says otherwise.
   typed seed helpers `test_support::{date, datetime}`
 - SeaORM gotcha: never `.save()` with a `Set` PK — it always takes the UPDATE path
   (RecordNotUpdated on first insert); branch `.insert()`/`.update()` explicitly
-- SQLite FKs are declared but INERT (no `PRAGMA foreign_keys=ON` yet — healthie-38x);
-  services self-enforce referential integrity via `require()` — keep doing so
+- SQLite FKs are ENFORCED: `PRAGMA foreign_keys=ON` is explicit on the binary's
+  connection (healthie-mcp main.rs) and in `test_db()` (healthie-38x); services
+  still self-enforce referential integrity via `require()` as the backstop for
+  actionable errors — keep doing so
 - Do NOT commit new `docs/superpowers/` specs/plans — decisions become ADRs in
   `docs/adr/` (immutable once accepted; supersede, don't edit); active plans stay
   untracked on disk
