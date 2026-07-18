@@ -11,12 +11,14 @@ use healthie_shared::{
     services::{briefing, checkin, concern, goal, observation, plan, profile, protocol},
 };
 use rmcp::{
-    ErrorData as McpError, ServerHandler,
+    ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{common::FromContextPart, tool::ToolCallContext},
     model::{
-        CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo,
-        ToolsCapability,
+        CallToolResult, ContentBlock, Implementation, ListResourcesResult, PaginatedRequestParams,
+        ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents,
+        ResourcesCapability, ServerCapabilities, ServerInfo, ToolsCapability,
     },
+    service::RequestContext,
     tool, tool_handler, tool_router,
 };
 use sea_orm::DatabaseConnection;
@@ -28,6 +30,10 @@ use crate::schemas::{
     RecordProtocolOutcomeInput, SetGoalInput, StartProtocolInput, UpdateConcernStatusInput,
     UpdateProfileInput,
 };
+
+/// The one M1b resource. Per-concern dossiers and goal progress are follow-ups
+/// (they need list-by-concern service fns / M2 `DailyMetrics`).
+pub const BRIEFING_URI: &str = "healthie://briefing";
 
 #[derive(Clone)]
 pub struct HealthieMcp {
@@ -328,12 +334,52 @@ impl ServerHandler for HealthieMcp {
     fn get_info(&self) -> ServerInfo {
         let mut capabilities = ServerCapabilities::default();
         capabilities.tools = Some(ToolsCapability::default());
+        capabilities.resources = Some(ResourcesCapability::default());
         ServerInfo::new(capabilities)
             .with_server_info(Implementation::new(
                 "healthie-mcp",
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions("healthie MCP: placeholder — finalized in the wrap-up task.")
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        let briefing = Resource::new(BRIEFING_URI, "Current briefing")
+            .with_description(
+                "The current health briefing: profile, last checkin, previous plan with outcomes, \
+                 active concerns/goals/protocols, observations pending review.",
+            )
+            .with_mime_type("application/json");
+        Ok(ListResourcesResult::with_all_items(vec![briefing]))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, McpError> {
+        match request.uri.as_str() {
+            BRIEFING_URI => {
+                let briefing = briefing::assemble(&*self.db, clock::today())
+                    .await
+                    .map_err(resource_error)?;
+                let json = serde_json::to_string_pretty(&briefing).map_err(|err| {
+                    tracing::error!(?err, "MCP resource: serialization failed");
+                    McpError::internal_error("serialization error", None)
+                })?;
+                Ok(ReadResourceResult::new(vec![
+                    ResourceContents::text(json, BRIEFING_URI).with_mime_type("application/json"),
+                ]))
+            }
+            other => Err(McpError::invalid_params(
+                format!("unknown resource URI '{other}'; known URIs: {BRIEFING_URI}"),
+                None,
+            )),
+        }
     }
 }
 
@@ -386,6 +432,25 @@ fn domain_error(err: DomainError) -> Result<CallToolResult, McpError> {
         DomainError::Internal(detail) => {
             tracing::error!(detail, "MCP tool: internal error");
             Err(McpError::internal_error("internal error", None))
+        }
+    }
+}
+
+/// Resource-side counterpart of [`domain_error`] — resources have no tool-level
+/// error channel, so recoverable variants map to typed protocol errors.
+fn resource_error(err: DomainError) -> McpError {
+    match err {
+        DomainError::NotFound(msg) => McpError::resource_not_found(msg, None),
+        DomainError::Invalid { .. } | DomainError::BadRequest(_) => {
+            McpError::invalid_params(err.to_string(), None)
+        }
+        DomainError::Db(db_err) => {
+            tracing::error!(?db_err, "MCP resource: database error");
+            McpError::internal_error("database error", None)
+        }
+        DomainError::Internal(detail) => {
+            tracing::error!(detail, "MCP resource: internal error");
+            McpError::internal_error("internal error", None)
         }
     }
 }

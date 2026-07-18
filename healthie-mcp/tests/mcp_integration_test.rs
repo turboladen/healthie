@@ -448,6 +448,57 @@ async fn commit_plan_requires_items() {
     assert!(is_error, "empty plan must be rejected");
 }
 
+#[tokio::test]
+async fn briefing_resource_lists_and_reads() {
+    let (app, _db) = setup().await;
+    handshake(&app).await;
+
+    let body = post_rpc(
+        &app,
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "resources/list" }),
+    )
+    .await;
+    assert!(body.contains("healthie://briefing"), "{body}");
+    assert!(
+        body.contains("application/json"),
+        "resource entry must advertise its mime type: {body}"
+    );
+
+    let body = post_rpc(
+        &app,
+        json!({
+            "jsonrpc": "2.0", "id": 4, "method": "resources/read",
+            "params": { "uri": "healthie://briefing" }
+        }),
+    )
+    .await;
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    let text = parsed["result"]["contents"][0]["text"]
+        .as_str()
+        .expect("text contents");
+    let briefing: Value = serde_json::from_str(text).expect("briefing json");
+    assert!(briefing["generated_on"].is_string());
+}
+
+#[tokio::test]
+async fn unknown_resource_uri_is_invalid_params() {
+    let (app, _db) = setup().await;
+    handshake(&app).await;
+    let body = post_rpc(
+        &app,
+        json!({
+            "jsonrpc": "2.0", "id": 5, "method": "resources/read",
+            "params": { "uri": "healthie://nope" }
+        }),
+    )
+    .await;
+    assert!(body.contains("error"), "{body}");
+    assert!(
+        body.contains("healthie://briefing"),
+        "error should list known URIs: {body}"
+    );
+}
+
 /// The 15 tools the M1b surface must advertise.
 const EXPECTED_TOOLS: [&str; 15] = [
     "get_briefing",
