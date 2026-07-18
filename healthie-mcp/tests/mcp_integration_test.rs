@@ -104,6 +104,17 @@ async fn handshake_succeeds_statelessly() {
 }
 
 #[tokio::test]
+async fn get_briefing_on_empty_db_returns_briefing_json() {
+    let (app, _db) = setup().await;
+    handshake(&app).await;
+    let body = post_rpc(&app, call_tool("get_briefing", json!({}))).await;
+    let payload = tool_payload(&body);
+    assert!(payload["generated_on"].is_string());
+    assert_eq!(payload["active_concerns"], json!([]));
+    assert!(payload["last_checkin"].is_null());
+}
+
+#[tokio::test]
 async fn tools_list_responds() {
     let (app, _db) = setup().await;
     handshake(&app).await;
