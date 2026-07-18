@@ -2,7 +2,7 @@
 
 [default.extend-words]
 # Project/domain vocabulary, not typos:
-hae = "hae"   # Health Auto Export (iOS app); /ingest/hae endpoint
+hae = "hae" # Health Auto Export (iOS app); /ingest/hae endpoint
 fewd = "fewd" # sibling food-tracking project
 
 [files]
