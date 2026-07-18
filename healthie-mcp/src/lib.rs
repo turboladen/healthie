@@ -8,6 +8,7 @@
 //! allowlist (DNS-rebinding defense; extend via `HEALTHIE_MCP_ALLOWED_HOSTS`).
 
 mod handler;
+mod prompts;
 mod schemas;
 
 use std::sync::Arc;

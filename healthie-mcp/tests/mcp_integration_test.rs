@@ -499,6 +499,22 @@ async fn unknown_resource_uri_is_invalid_params() {
     );
 }
 
+#[tokio::test]
+async fn checkin_prompt_renders_over_the_wire() {
+    let (app, _db) = setup().await;
+    handshake(&app).await;
+    let body = post_rpc(
+        &app,
+        json!({
+            "jsonrpc": "2.0", "id": 6, "method": "prompts/get",
+            "params": { "name": "checkin", "arguments": { "focus": "knee clicking" } }
+        }),
+    )
+    .await;
+    assert!(body.contains("knee clicking"), "{body}");
+    assert!(body.contains("get_briefing"), "{body}");
+}
+
 /// The 15 tools the M1b surface must advertise.
 const EXPECTED_TOOLS: [&str; 15] = [
     "get_briefing",

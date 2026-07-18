@@ -32,6 +32,13 @@ use serde::Deserialize;
 #[derive(Deserialize, JsonSchema)]
 pub struct EmptyParams {}
 
+/// Arguments for the `checkin` prompt.
+#[derive(Deserialize, JsonSchema)]
+pub struct CheckinPromptArgs {
+    /// Anything specific on your mind to start from (optional).
+    pub focus: Option<String>,
+}
+
 /// Open a new health concern — the top of the Concern → Goal → Protocol chain.
 #[derive(Deserialize, JsonSchema)]
 pub struct OpenConcernInput {

@@ -15,9 +15,10 @@ use rmcp::{
     handler::server::{common::FromContextPart, tool::ToolCallContext},
     model::{
         CallToolResult, ContentBlock, Implementation, ListResourcesResult, PaginatedRequestParams,
-        ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents,
-        ResourcesCapability, ServerCapabilities, ServerInfo, ToolsCapability,
+        PromptsCapability, ReadResourceRequestParams, ReadResourceResult, Resource,
+        ResourceContents, ResourcesCapability, ServerCapabilities, ServerInfo, ToolsCapability,
     },
+    prompt_handler,
     service::RequestContext,
     tool, tool_handler, tool_router,
 };
@@ -330,11 +331,13 @@ impl HealthieMcp {
 }
 
 #[tool_handler]
+#[prompt_handler]
 impl ServerHandler for HealthieMcp {
     fn get_info(&self) -> ServerInfo {
         let mut capabilities = ServerCapabilities::default();
         capabilities.tools = Some(ToolsCapability::default());
         capabilities.resources = Some(ResourcesCapability::default());
+        capabilities.prompts = Some(PromptsCapability::default());
         ServerInfo::new(capabilities)
             .with_server_info(Implementation::new(
                 "healthie-mcp",
