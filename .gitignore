@@ -11,3 +11,6 @@ docs/superpowers/
 target/
 *.db-shm
 *.db-wal
+
+# Runtime data (SQLite DB + files) — never committed
+/data/
