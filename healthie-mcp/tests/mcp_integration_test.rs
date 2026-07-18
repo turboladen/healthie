@@ -440,6 +440,62 @@ async fn record_checkin_response_rejects_completed_checkin() {
 }
 
 #[tokio::test]
+async fn record_checkin_response_links_a_real_concern() {
+    let (app, _db) = setup().await;
+    handshake(&app).await;
+    let body = post_rpc(
+        &app,
+        call_tool("open_concern", json!({ "name": "Lower back tightness" })),
+    )
+    .await;
+    let concern_id = tool_payload(&body)["concern"]["id"]
+        .as_i64()
+        .expect("concern id");
+
+    let body = post_rpc(&app, call_tool("start_checkin", json!({}))).await;
+    let checkin_id = tool_payload(&body)["id"].as_i64().expect("checkin id");
+
+    let body = post_rpc(
+        &app,
+        call_tool(
+            "record_checkin_response",
+            json!({
+                "checkin_id": checkin_id,
+                "question": "How's the back?",
+                "answer": "Looser after the mobility work.",
+                "concern_id": concern_id
+            }),
+        ),
+    )
+    .await;
+    let payload = tool_payload(&body);
+    assert_eq!(payload["concern_id"].as_i64(), Some(concern_id));
+}
+
+#[tokio::test]
+async fn record_checkin_response_rejects_unknown_concern() {
+    let (app, _db) = setup().await;
+    handshake(&app).await;
+    let body = post_rpc(&app, call_tool("start_checkin", json!({}))).await;
+    let checkin_id = tool_payload(&body)["id"].as_i64().expect("checkin id");
+
+    let body = post_rpc(
+        &app,
+        call_tool(
+            "record_checkin_response",
+            json!({
+                "checkin_id": checkin_id,
+                "question": "Anything about the shoulder?",
+                "answer": "No change.",
+                "concern_id": 9999
+            }),
+        ),
+    )
+    .await;
+    assert_tool_error(&body, "not found");
+}
+
+#[tokio::test]
 async fn commit_plan_requires_items() {
     let (app, _db) = setup().await;
     handshake(&app).await;
