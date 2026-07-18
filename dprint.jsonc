@@ -21,6 +21,12 @@
 
   "json": {},
 
+  // Format Cargo.toml without applying Cargo conventions (key reordering) —
+  // reordering would churn every manifest and fight hand-curated key order.
+  "toml": {
+    "cargo.applyConventions": false,
+  },
+
   // No "includes": dprint formats every file it has a plugin for, minus the
   // excludes below.
   "excludes": [
@@ -45,15 +51,6 @@
     // Being retired (specs/plans are distilled into docs/adr/, healthie-19k);
     // don't churn files scheduled for deletion.
     "docs/superpowers",
-    // TEMPORARY: the toml plugin reorders keys, which would guarantee merge
-    // conflicts with in-flight branches editing Cargo.toml files. Normalizing
-    // TOML (and removing this exclude) is a filed follow-up; drop it once the
-    // current PR train has merged.
-    "**/Cargo.toml",
-    // Legacy Python-era file, already deleted on an in-flight branch — no point
-    // formatting it here just to conflict with its removal. Remove this exclude
-    // together with the file.
-    "pyproject.toml",
   ],
 
   // Plugin versions are pinned. Bump deliberately with `dprint config update`
