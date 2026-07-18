@@ -8,7 +8,7 @@ use std::sync::Arc;
 use healthie_shared::{
     clock,
     error::{DomainError, DomainResult},
-    services::briefing,
+    services::{briefing, concern, goal, profile, protocol},
 };
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -22,7 +22,10 @@ use rmcp::{
 use sea_orm::DatabaseConnection;
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::schemas::EmptyParams;
+use crate::schemas::{
+    EmptyParams, OpenConcernInput, RecordProtocolOutcomeInput, SetGoalInput, StartProtocolInput,
+    UpdateConcernStatusInput, UpdateProfileInput,
+};
 
 #[derive(Clone)]
 pub struct HealthieMcp {
@@ -54,6 +57,131 @@ impl HealthieMcp {
             Err(e) => return Ok(e),
         };
         domain_result(briefing::assemble(&*self.db, clock::today()).await)
+    }
+
+    #[tool(
+        name = "open_concern",
+        description = "Open a new health concern (the unit everything else hangs off: goals, \
+            protocols, observations). Use when something new is worth tracking, not for \
+            one-off observations — those are log_observation.",
+        input_schema = rmcp::handler::server::common::schema_for_type::<OpenConcernInput>()
+    )]
+    async fn open_concern(
+        &self,
+        params: LenientParameters<OpenConcernInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = match params.into_tool_input("open_concern") {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+        domain_result(concern::open(&*self.db, input.into_domain()).await)
+    }
+
+    #[tool(
+        name = "update_concern_status",
+        description = "Move a concern between active / monitoring / resolved, optionally \
+            appending a dated note to its narrative. Resolving stamps resolved_on.",
+        input_schema = rmcp::handler::server::common::schema_for_type::<UpdateConcernStatusInput>()
+    )]
+    async fn update_concern_status(
+        &self,
+        params: LenientParameters<UpdateConcernStatusInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = match params.into_tool_input("update_concern_status") {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+        domain_result(
+            concern::update_status(&*self.db, input.concern_id, input.status, input.note).await,
+        )
+    }
+
+    #[tool(
+        name = "set_goal",
+        description = "Set a goal, optionally under a concern. Measurable goals carry a \
+            comparison (at-most / at-least / range) with target values.",
+        input_schema = rmcp::handler::server::common::schema_for_type::<SetGoalInput>()
+    )]
+    async fn set_goal(
+        &self,
+        params: LenientParameters<SetGoalInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = match params.into_tool_input("set_goal") {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+        domain_result(goal::set(&*self.db, input.into_domain()).await)
+    }
+
+    #[tool(
+        name = "start_protocol",
+        description = "Start a protocol: a deliberate intervention (supplement, exercise, \
+            diet, therapy, habit, …) with a purpose and review-by date. Check \
+            get_protocol_history first — verdicts are permanent so nothing is re-tried blind.",
+        input_schema = rmcp::handler::server::common::schema_for_type::<StartProtocolInput>()
+    )]
+    async fn start_protocol(
+        &self,
+        params: LenientParameters<StartProtocolInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = match params.into_tool_input("start_protocol") {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+        domain_result(protocol::start(&*self.db, input.into_domain()).await)
+    }
+
+    #[tool(
+        name = "record_protocol_outcome",
+        description = "Record a protocol's final verdict (worked / didnt-work / mixed / \
+            inconclusive) with a mandatory rationale. Permanent — one verdict per protocol, \
+            this is the record future planning consults.",
+        input_schema = rmcp::handler::server::common::schema_for_type::<RecordProtocolOutcomeInput>()
+    )]
+    async fn record_protocol_outcome(
+        &self,
+        params: LenientParameters<RecordProtocolOutcomeInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = match params.into_tool_input("record_protocol_outcome") {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+        let (id, outcome) = input.into_domain();
+        domain_result(protocol::record_outcome(&*self.db, id, outcome).await)
+    }
+
+    #[tool(
+        name = "get_protocol_history",
+        description = "Every protocol ever tried, most recent first, with verdicts and \
+            rationales. Consult before proposing any new intervention.",
+        input_schema = rmcp::handler::server::common::schema_for_type::<EmptyParams>()
+    )]
+    async fn get_protocol_history(
+        &self,
+        params: LenientParameters<EmptyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let EmptyParams {} = match params.into_tool_input("get_protocol_history") {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+        domain_result(protocol::history(&*self.db).await)
+    }
+
+    #[tool(
+        name = "update_profile",
+        description = "Set profile facts (date of birth, sex, height, standing notes) that \
+            every briefing carries. Set-only: omitted fields are untouched.",
+        input_schema = rmcp::handler::server::common::schema_for_type::<UpdateProfileInput>()
+    )]
+    async fn update_profile(
+        &self,
+        params: LenientParameters<UpdateProfileInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = match params.into_tool_input("update_profile") {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+        domain_result(profile::upsert(&*self.db, input.into_domain()).await)
     }
 }
 

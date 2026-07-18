@@ -115,6 +115,163 @@ async fn get_briefing_on_empty_db_returns_briefing_json() {
 }
 
 #[tokio::test]
+async fn open_concern_round_trips_with_tags() {
+    let (app, _db) = setup().await;
+    handshake(&app).await;
+    let body = post_rpc(
+        &app,
+        call_tool(
+            "open_concern",
+            json!({
+                "name": "Right shoulder pain",
+                "narrative": "Started after deadlifts in June.",
+                "tags": ["musculoskeletal", "fitness"]
+            }),
+        ),
+    )
+    .await;
+    let payload = tool_payload(&body);
+    assert_eq!(payload["concern"]["name"], "Right shoulder pain");
+    assert_eq!(payload["tags"], json!(["musculoskeletal", "fitness"]));
+
+    let body = post_rpc(&app, call_tool("get_briefing", json!({}))).await;
+    let payload = tool_payload(&body);
+    assert_eq!(
+        payload["active_concerns"][0]["concern"]["name"],
+        "Right shoulder pain"
+    );
+}
+
+#[tokio::test]
+async fn open_concern_rejects_unknown_tag_with_schema_hint() {
+    let (app, _db) = setup().await;
+    handshake(&app).await;
+    let body = post_rpc(
+        &app,
+        call_tool(
+            "open_concern",
+            json!({ "name": "X", "tags": ["not-a-real-tag"] }),
+        ),
+    )
+    .await;
+    assert_tool_error(&body, "input schema");
+}
+
+#[tokio::test]
+async fn update_concern_status_resolves_and_reports_not_found() {
+    let (app, _db) = setup().await;
+    handshake(&app).await;
+    let body = post_rpc(
+        &app,
+        call_tool("open_concern", json!({ "name": "Sleep debt" })),
+    )
+    .await;
+    let id = tool_payload(&body)["concern"]["id"].as_i64().expect("id");
+
+    let body = post_rpc(
+        &app,
+        call_tool(
+            "update_concern_status",
+            json!({ "concern_id": id, "status": "resolved", "note": "Consistent 7h for a month." }),
+        ),
+    )
+    .await;
+    let payload = tool_payload(&body);
+    assert_eq!(payload["status"], "resolved");
+    assert!(payload["resolved_on"].is_string());
+
+    let body = post_rpc(
+        &app,
+        call_tool(
+            "update_concern_status",
+            json!({ "concern_id": 9999, "status": "active" }),
+        ),
+    )
+    .await;
+    assert_tool_error(&body, "not found");
+}
+
+#[tokio::test]
+async fn set_goal_surfaces_domain_validation_as_tool_error() {
+    let (app, _db) = setup().await;
+    handshake(&app).await;
+    // range comparison without target_high is a domain Invalid
+    let body = post_rpc(
+        &app,
+        call_tool(
+            "set_goal",
+            json!({ "title": "Bodyweight in range", "comparison": "range", "target_value": 175.0 }),
+        ),
+    )
+    .await;
+    let (is_error, text) = tool_result(&body);
+    assert!(is_error, "expected domain validation to surface: {text}");
+}
+
+#[tokio::test]
+async fn protocol_lifecycle_start_outcome_history() {
+    let (app, _db) = setup().await;
+    handshake(&app).await;
+    let body = post_rpc(
+        &app,
+        call_tool(
+            "start_protocol",
+            json!({
+                "name": "Creatine 5g daily", "kind": "supplement",
+                "purpose": "Strength + cognition support", "review_by": "2026-10-01"
+            }),
+        ),
+    )
+    .await;
+    let id = tool_payload(&body)["id"].as_i64().expect("id");
+
+    let body = post_rpc(
+        &app,
+        call_tool(
+            "record_protocol_outcome",
+            json!({ "protocol_id": id, "verdict": "worked", "rationale": "Gym volume up, no sides." }),
+        ),
+    )
+    .await;
+    assert_eq!(tool_payload(&body)["verdict"], "worked");
+
+    // Verdicts are permanent — recording twice is a BadRequest tool error.
+    let body = post_rpc(
+        &app,
+        call_tool(
+            "record_protocol_outcome",
+            json!({ "protocol_id": id, "verdict": "mixed", "rationale": "second thoughts" }),
+        ),
+    )
+    .await;
+    let (is_error, _) = tool_result(&body);
+    assert!(is_error, "verdict must be immutable");
+
+    let body = post_rpc(&app, call_tool("get_protocol_history", json!({}))).await;
+    let payload = tool_payload(&body);
+    assert_eq!(payload[0]["name"], "Creatine 5g daily");
+    assert_eq!(payload[0]["verdict"], "worked");
+}
+
+#[tokio::test]
+async fn update_profile_sets_fields_visible_in_briefing() {
+    let (app, _db) = setup().await;
+    handshake(&app).await;
+    let body = post_rpc(
+        &app,
+        call_tool(
+            "update_profile",
+            json!({ "date_of_birth": "1980-03-14", "sex": "male", "height_cm": 180 }),
+        ),
+    )
+    .await;
+    assert_eq!(tool_payload(&body)["height_cm"], 180);
+
+    let body = post_rpc(&app, call_tool("get_briefing", json!({}))).await;
+    assert_eq!(tool_payload(&body)["profile"]["sex"], "male");
+}
+
+#[tokio::test]
 async fn tools_list_responds() {
     let (app, _db) = setup().await;
     handshake(&app).await;
