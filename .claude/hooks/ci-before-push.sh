@@ -11,6 +11,11 @@
 #
 # Bypass for one call: prefix with `SKIP_CI_HOOK=1` (e.g. `SKIP_CI_HOOK=1 git push`).
 #
+# Path-aware skip: pushes whose outgoing commits touch only non-code paths
+# (.beads/ mirror syncs, docs/, markdown, .gitignore) skip the gate entirely —
+# this repo pushes bead-state and docs constantly and those can't break CI.
+# Anything code-shaped (or undeterminable) pays the full gate.
+#
 # Known limitations (accepted): matching is substring-based, so exotic
 # spellings (`git -C path push`, aliases) bypass the gate, and a command that
 # merely quotes "git push" (e.g. `git log --grep 'git push'`) pays a
@@ -64,6 +69,28 @@ case "$cmd" in
 esac
 
 repo_root=$(git -C "$run_dir" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$run_dir")
+
+# Path-aware skip: compare the outgoing commits against the upstream (or
+# origin/main for a first push) and pass through when nothing code-shaped
+# changed. Unknown state (no merge-base, detached, etc.) falls through to the
+# full gate — when in doubt, validate.
+upstream=$(git -C "$repo_root" rev-parse --symbolic-full-name '@{u}' 2>/dev/null || true)
+[ -n "$upstream" ] || upstream=origin/main
+base=$(git -C "$repo_root" merge-base HEAD "$upstream" 2>/dev/null || true)
+if [ -n "$base" ]; then
+  changed=$(git -C "$repo_root" diff --name-only "$base" HEAD)
+  code_touched=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in
+      .beads/* | docs/* | *.md | .gitignore | .git-blame-ignore-revs | LICENSE*) ;;
+      *) code_touched=1; break ;;
+    esac
+  done <<PATHS
+$changed
+PATHS
+  [ "$code_touched" -eq 1 ] || exit 0
+fi
 
 if output=$(cd "$repo_root" && just ci </dev/null 2>&1); then
   exit 0
