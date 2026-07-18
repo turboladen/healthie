@@ -346,7 +346,27 @@ impl ServerHandler for HealthieMcp {
                 "healthie-mcp",
                 env!("CARGO_PKG_VERSION"),
             ))
-            .with_instructions("healthie MCP: placeholder — finalized in the wrap-up task.")
+            .with_instructions(
+                "healthie MCP: the system of record for Steve's health — concerns, goals, \
+                 protocols, observations, checkins, plans. The accountability loop is the \
+                 product. Canonical flow: (1) ORIENT — get_briefing first, every conversation (or \
+                 read healthie://briefing). (2) ACCOUNTABILITY — walk the previous plan's items \
+                 and record_plan_outcome for each before planning anything new. (3) CHECKIN — \
+                 start_checkin, then record_checkin_response per exchange AS IT HAPPENS \
+                 (append-only; a dropped conversation resumes cleanly). (4) CAPTURE — \
+                 log_observation / log_symptom anytime (origin 'self' when Steve reported it, \
+                 'ai' for your inference); open_concern for new recurring problems; set_goal \
+                 under concerns; start_protocol for deliberate interventions — but check \
+                 get_protocol_history first: verdicts are permanent and nothing gets re-tried \
+                 blind. record_protocol_outcome settles a protocol with a verdict + rationale. \
+                 (5) PLAN — commit_plan with typed items (workout → calendar-bound, action → \
+                 discrete to-do, guidance/nutrition → direction on the plan itself); healthie's \
+                 copy is the source of truth, external pushes happen at the conversation layer. \
+                 (6) CLOSE — complete_checkin with a summary the next checkin's accountability \
+                 pass will read aloud. The `checkin` prompt scripts this whole flow. Cadence- \
+                 agnostic: a checkin covers 'since the last checkin'. update_profile for standing \
+                 facts. All dates YYYY-MM-DD; timestamps RFC 3339 UTC.",
+            )
     }
 
     async fn list_resources(

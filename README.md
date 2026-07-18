@@ -15,6 +15,27 @@ just ci                  # full gate: build + test + clippy
 cargo test --workspace
 ```
 
+## Run the MCP server
+
+```bash
+# Provision the bearer token — printed ONCE, store it now.
+healthie-mcp token provision
+
+# Serve (defaults: --db-path data/healthie.db, --listen 0.0.0.0:3005).
+healthie-mcp serve
+
+# Exposing over Tailscale? rmcp's DNS-rebinding defense rejects unknown Host
+# headers — allowlist your hostnames (comma-separated; blank = any port):
+HEALTHIE_MCP_ALLOWED_HOSTS=odroid.tailnet.ts.net,dietpi.local:3005 healthie-mcp serve
+
+# Rotate or revoke the token:
+healthie-mcp token provision   # rotates; previous token stops working
+healthie-mcp token revoke      # all requests 401 until re-provisioned
+```
+
+Every request needs `Authorization: Bearer <token>`; the token is stored only as
+an argon2id hash and never logged.
+
 ## Project docs
 
 - `docs/adr/` — architecture decision records (the durable "why")
@@ -23,4 +44,6 @@ cargo test --workspace
 ## Status
 
 M1a complete: `healthie-shared` domain library (entities, migrations, services,
-briefing assembler). Next: `healthie-mcp` server.
+briefing assembler). M1b complete: `healthie-mcp` — bearer-authed rmcp server
+(15 tools, `healthie://briefing` resource, `checkin` prompt) with a binary host
+until the M2 backend nests its `router()`. Next: `healthie-backend` + Svelte SPA.

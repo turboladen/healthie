@@ -665,7 +665,7 @@ async fn briefing_resource_lists_and_reads() {
         json!({ "jsonrpc": "2.0", "id": 3, "method": "resources/list" }),
     )
     .await;
-    assert!(body.contains("healthie://briefing"), "{body}");
+    assert!(body.contains(healthie_mcp::BRIEFING_URI), "{body}");
     assert!(
         body.contains("application/json"),
         "resource entry must advertise its mime type: {body}"
@@ -676,7 +676,7 @@ async fn briefing_resource_lists_and_reads() {
         &token,
         json!({
             "jsonrpc": "2.0", "id": 4, "method": "resources/read",
-            "params": { "uri": "healthie://briefing" }
+            "params": { "uri": healthie_mcp::BRIEFING_URI }
         }),
     )
     .await;
@@ -703,7 +703,7 @@ async fn unknown_resource_uri_is_invalid_params() {
     .await;
     assert!(body.contains("error"), "{body}");
     assert!(
-        body.contains("healthie://briefing"),
+        body.contains(healthie_mcp::BRIEFING_URI),
         "error should list known URIs: {body}"
     );
 }
@@ -771,8 +771,26 @@ async fn tools_list_advertises_all_tools_with_populated_schemas() {
         "unexpected tool count: {names:?}"
     );
 
-    // (1) An arg-bearing tool must advertise a non-empty inputSchema — guards
-    // the per-tool `input_schema = schema_for_type::<T>()` override footgun.
+    // (1) EVERY arg-taking tool must advertise a non-empty inputSchema —
+    // guards the per-tool `input_schema = schema_for_type::<T>()` override
+    // footgun, which is per-tool: a single missed override silently ships an
+    // empty schema. The three no-arg tools correctly carry no properties.
+    let no_arg_tools = ["get_briefing", "start_checkin", "get_protocol_history"];
+    for tool in tools {
+        let name = tool["name"].as_str().expect("tool name");
+        if no_arg_tools.contains(&name) {
+            continue;
+        }
+        let properties = tool["inputSchema"]["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{name}: inputSchema has no properties object"));
+        assert!(
+            !properties.is_empty(),
+            "{name}: empty input schema — missing input_schema attr?"
+        );
+    }
+
+    // The canonical arg-bearing tool exposes exactly the fields we expect.
     let open_concern = tools
         .iter()
         .find(|t| t["name"] == "open_concern")
@@ -801,4 +819,40 @@ async fn tools_list_advertises_all_tools_with_populated_schemas() {
         .as_object()
         .map_or(0, serde_json::Map::len);
     assert_eq!(empty_props, 0, "EmptyParams tool must have no properties");
+}
+
+#[tokio::test]
+async fn instructions_teach_the_loop() {
+    let (app, _db, token) = setup().await;
+    let body = post_rpc(
+        &app,
+        &token,
+        json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": "2025-06-18", "capabilities": {},
+                        "clientInfo": { "name": "t", "version": "0" } }
+        }),
+    )
+    .await;
+    for marker in [
+        "get_briefing",
+        "record_plan_outcome",
+        "commit_plan",
+        "complete_checkin",
+        "checkin",
+    ] {
+        assert!(body.contains(marker), "instructions must mention {marker}");
+    }
+
+    // initialize must advertise all three capability groups this server backs.
+    let parsed: Value = serde_json::from_str(&body).expect("json body");
+    let capabilities = parsed["result"]["capabilities"]
+        .as_object()
+        .expect("capabilities object");
+    for group in ["tools", "resources", "prompts"] {
+        assert!(
+            capabilities.contains_key(group),
+            "initialize must advertise {group} capability: {body}"
+        );
+    }
 }
