@@ -1,0 +1,20 @@
+[package]
+name = "healthie-mcp"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+healthie-shared = { path = "../healthie-shared", features = ["schemars"] }
+axum.workspace = true
+chrono.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+sea-orm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+healthie-shared = { path = "../healthie-shared", features = ["schemars", "test-support"] }
+tower.workspace = true

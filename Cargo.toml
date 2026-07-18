@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["healthie-shared"]
+members = ["healthie-shared", "healthie-mcp"]
 
 [workspace.package]
 edition = "2024"
@@ -22,6 +22,9 @@ tracing = "0.1"
 argon2 = { version = "0.5", features = ["std"] }
 base64 = "0.22"
 schemars = { version = "1", features = ["chrono04"] }
+axum = "0.8"
+rmcp = { version = "2.2", features = ["server", "macros", "transport-streamable-http-server", "schemars"] }
+tower = "0.5"
 
 [profile.release]
 lto = "thin"
