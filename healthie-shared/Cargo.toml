@@ -18,6 +18,8 @@ serde_json.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+argon2.workspace = true
+base64.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

@@ -17,6 +17,10 @@ thiserror = "2"
 anyhow = "1"
 async-trait = "0.1"
 tracing = "0.1"
+# `std` enables password-hash/std -> rand_core/std -> getrandom, which gates
+# `OsRng` (used for CSPRNG token bytes + salt). Keeps rand off the dep list.
+argon2 = { version = "0.5", features = ["std"] }
+base64 = "0.22"
 
 [profile.release]
 lto = "thin"
