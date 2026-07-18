@@ -8,6 +8,7 @@
 //! (DNS-rebinding defense; extend via `HEALTHIE_MCP_ALLOWED_HOSTS`).
 
 pub mod auth;
+pub mod config;
 mod handler;
 mod prompts;
 mod schemas;

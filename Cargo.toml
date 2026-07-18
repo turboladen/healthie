@@ -26,6 +26,9 @@ axum = "0.8"
 axum-extra = { version = "0.10", features = ["typed-header"] }
 rmcp = { version = "2.2", features = ["server", "macros", "transport-streamable-http-server", "schemars"] }
 tower = "0.5"
+clap = { version = "4", features = ["derive", "env"] }
+sqlx = { version = "0.8", default-features = false, features = ["sqlite"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [profile.release]
 lto = "thin"
