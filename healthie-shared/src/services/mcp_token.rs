@@ -21,10 +21,20 @@ use crate::{
 
 /// The one-time provision result. `plaintext` is shown to the operator once;
 /// only its argon2id hash is stored.
-#[derive(Debug)]
 pub struct ProvisionedToken {
     pub plaintext: String,
     pub fingerprint: String,
+}
+
+/// Manual impl so `{:?}` can never leak the live plaintext into logs or
+/// panic messages; only the (deliberately cleartext) fingerprint is shown.
+impl std::fmt::Debug for ProvisionedToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProvisionedToken")
+            .field("plaintext", &"<redacted>")
+            .field("fingerprint", &self.fingerprint)
+            .finish()
+    }
 }
 
 /// Create or rotate the operator token. Returns the plaintext exactly once.
@@ -191,5 +201,47 @@ mod tests {
         revoke(&db).await.expect("revoke");
         assert_eq!(verify(&db, &issued.plaintext).await.expect("verify"), None);
         revoke(&db).await.expect("revoke again (idempotent)");
+    }
+
+    #[test]
+    fn debug_format_redacts_plaintext() {
+        let token = ProvisionedToken {
+            plaintext: "secret-token-value".to_owned(),
+            fingerprint: "abcd1234".to_owned(),
+        };
+        let debug = format!("{token:?}");
+        assert!(
+            !debug.contains("secret-token-value"),
+            "Debug must not leak the plaintext: {debug}"
+        );
+        assert!(debug.contains("<redacted>"));
+        assert!(
+            debug.contains("abcd1234"),
+            "fingerprint stays visible: {debug}"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_serialization_omits_token_hash() {
+        let db = test_db().await;
+        provision(&db).await.expect("provision");
+        let row = mcp_token::Entity::find_by_id(1)
+            .one(&db)
+            .await
+            .expect("query")
+            .expect("row");
+        let json = serde_json::to_string(&row).expect("serialize");
+        assert!(
+            !json.contains("token_hash"),
+            "hash key must not serialize: {json}"
+        );
+        assert!(
+            !json.contains("$argon2id$"),
+            "hash value must not serialize: {json}"
+        );
+        assert!(
+            json.contains(&row.fingerprint),
+            "fingerprint serializes on purpose"
+        );
     }
 }

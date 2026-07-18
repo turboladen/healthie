@@ -10,9 +10,11 @@ use serde::{Deserialize, Serialize};
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: i32,
-    /// Argon2id PHC string (`$argon2id$...`). Never serialize this outward in
-    /// any future API — if this `Model` ever crosses a boundary, add
-    /// `#[serde(skip_serializing)]` first.
+    /// Argon2id PHC string (`$argon2id$...`). Sensitive auth material:
+    /// excluded from serialization so no future API can leak it by accident
+    /// (`SeaORM` maps rows via `FromQueryResult`, not serde, so this only
+    /// affects outward serialization).
+    #[serde(skip_serializing)]
     pub token_hash: String,
     /// First 8 chars of the plaintext (48 bits revealed, ~208 bits residual).
     pub fingerprint: String,
