@@ -41,6 +41,14 @@ pub struct CheckinPromptArgs {
     pub focus: Option<String>,
 }
 
+/// Arguments for the `baseline_intake` prompt.
+#[derive(Deserialize, JsonSchema)]
+pub struct BaselineIntakePromptArgs {
+    /// System area to focus this sitting on (optional) — e.g. "screenings",
+    /// "cardiovascular + family history".
+    pub area: Option<String>,
+}
+
 /// Open a new health concern — the top of the Concern → Goal → Protocol chain.
 #[derive(Deserialize, JsonSchema)]
 pub struct OpenConcernInput {

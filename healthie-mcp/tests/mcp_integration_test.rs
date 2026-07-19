@@ -726,6 +726,23 @@ async fn checkin_prompt_renders_over_the_wire() {
 }
 
 #[tokio::test]
+async fn baseline_intake_prompt_renders_over_the_wire() {
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
+    let body = post_rpc(
+        &app,
+        &token,
+        json!({
+            "jsonrpc": "2.0", "id": 6, "method": "prompts/get",
+            "params": { "name": "baseline_intake", "arguments": { "area": "screenings" } }
+        }),
+    )
+    .await;
+    assert!(body.contains("screenings"), "{body}");
+    assert!(body.contains("run_baseline_intake"), "{body}");
+}
+
+#[tokio::test]
 async fn intake_round_trip_record_coverage_update_resolve() {
     let (app, _db, token) = setup().await;
     handshake(&app, &token).await;
