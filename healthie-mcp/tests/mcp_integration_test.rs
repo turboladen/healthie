@@ -851,9 +851,10 @@ async fn record_intake_answers_rejects_empty_batch_as_tool_error() {
     let (is_error, _) = tool_result(&body);
     assert!(is_error, "empty batch must surface as a tool-level error");
 
-    // An entirely absent `claims` key must land on the SAME actionable
-    // domain error, not a generic serde missing-field message
-    // (#[serde(default)] routes it to record_batch's validation).
+    // An entirely absent `claims` key fails schema deserialization — kept
+    // that way ON PURPOSE so `claims` stays in the advertised `required`
+    // list (the schema is an LLM caller's primary coaching surface); the
+    // lenient-params error still names the field and points at the schema.
     let body = post_rpc(&app, &token, call_tool("record_intake_answers", json!({}))).await;
     let (is_error, text) = tool_result(&body);
     assert!(
@@ -861,8 +862,8 @@ async fn record_intake_answers_rejects_empty_batch_as_tool_error() {
         "absent claims key must surface as a tool-level error"
     );
     assert!(
-        text.contains("at least one claim"),
-        "absent key should reach the domain error, got: {text}"
+        text.contains("claims") && text.contains("input schema"),
+        "absent key should get the schema-hint error naming the field, got: {text}"
     );
 }
 
@@ -932,6 +933,83 @@ async fn subject_self_is_normalized_on_write_and_update() {
     )
     .await;
     assert_eq!(tool_payload(&body).as_array().expect("claims").len(), 2);
+}
+
+/// Case and blank edge cases of the sentinel: read and write share ONE
+/// predicate (trimmed, case-insensitive), blank on create means omitted,
+/// and blank on update is a loud error — never a silent clear.
+#[tokio::test]
+async fn subject_sentinel_handles_case_and_blank_variants() {
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
+
+    // Write "SELF" normalizes to NULL; a mixed-case READ ("Self") still
+    // resolves to the self scope.
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool(
+            "record_intake_answers",
+            json!({
+                "claims": [{ "category": "lifestyle", "statement": "Stretches nightly",
+                             "confidence": "recalled", "subject": "SELF" }]
+            }),
+        ),
+    )
+    .await;
+    assert!(
+        tool_payload(&body)[0]["subject"].is_null(),
+        "subject SELF must store as NULL"
+    );
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool("get_claims", json!({ "subject": "Self" })),
+    )
+    .await;
+    assert_eq!(
+        tool_payload(&body).as_array().expect("claims").len(),
+        1,
+        "mixed-case self read must resolve to the self scope"
+    );
+
+    // Blank subject on CREATE is treated as omitted (about Steve)…
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool(
+            "record_intake_answers",
+            json!({
+                "claims": [{ "category": "family-history", "statement": "Uncle: type 2 diabetes",
+                             "confidence": "recalled", "subject": "uncle" },
+                           { "category": "lifestyle", "statement": "Coffee: 2 cups most days",
+                             "confidence": "recalled", "subject": "  " }]
+            }),
+        ),
+    )
+    .await;
+    let saved = tool_payload(&body);
+    assert!(
+        saved[1]["subject"].is_null(),
+        "blank subject on create must store as NULL"
+    );
+    let uncle_id = saved[0]["id"].as_i64().expect("id");
+
+    // …but on UPDATE a blank subject is NOT a silent clear — the service
+    // rejects it loudly ("self" is the one documented clear affordance).
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool(
+            "update_claim",
+            json!({
+                "claim_id": uncle_id, "subject": " "
+            }),
+        ),
+    )
+    .await;
+    let (is_error, _) = tool_result(&body);
+    assert!(is_error, "blank subject on update must error, not clear");
 }
 
 #[tokio::test]

@@ -27,12 +27,31 @@ pub struct CategoryCoverage {
     pub last_touched: Option<DateTime<Utc>>,
 }
 
+/// A stored `subject` must be a real relative name: claims about Steve carry
+/// NULL, so the literal "self" (any case) or a blank string would create rows
+/// invisible to the self scope. The MCP boundary canonicalizes these away for
+/// its callers; this domain guard defends the invariant against every OTHER
+/// write path (M2 backend, tests, future surfaces) — ADR-0004 §2.
+fn validate_subject(subject: Option<&str>) -> DomainResult<()> {
+    if let Some(subject) = subject {
+        let trimmed = subject.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("self") {
+            return Err(DomainError::invalid(
+                "subject",
+                "must be a relative's name, or omitted for claims about Steve",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Record a batch of claims in one transaction.
 ///
 /// # Errors
-/// `Invalid` on an empty batch or any blank `statement`; `NotFound` if a
-/// `concern_id` doesn't exist; `Db` on database errors. Nothing persists
-/// unless every claim is valid.
+/// `Invalid` on an empty batch, any blank `statement`, or a `subject` that is
+/// blank or the reserved literal "self"; `NotFound` if a `concern_id` doesn't
+/// exist; `Db` on database errors. Nothing persists unless every claim is
+/// valid.
 pub async fn record_batch<C: ConnectionTrait + TransactionTrait>(
     db: &C,
     inputs: Vec<NewClaim>,
@@ -47,6 +66,7 @@ pub async fn record_batch<C: ConnectionTrait + TransactionTrait>(
         if input.statement.trim().is_empty() {
             return Err(DomainError::invalid("statement", "must not be empty"));
         }
+        validate_subject(input.subject.as_deref())?;
     }
     let txn = db.begin().await?;
     let now = clock::now();
@@ -80,8 +100,9 @@ pub async fn record_batch<C: ConnectionTrait + TransactionTrait>(
 /// evidence the claim was distilled from.
 ///
 /// # Errors
-/// `Invalid` for a blank `statement`; `NotFound` for a missing claim id or a
-/// missing `concern_id` target; `Db` on database errors.
+/// `Invalid` for a blank `statement` or a `subject` set to blank or the
+/// reserved literal "self"; `NotFound` for a missing claim id or a missing
+/// `concern_id` target; `Db` on database errors.
 pub async fn update(
     db: &impl ConnectionTrait,
     id: i32,
@@ -95,6 +116,9 @@ pub async fn update(
         && statement.trim().is_empty()
     {
         return Err(DomainError::invalid("statement", "must not be empty"));
+    }
+    if let Some(subject) = &input.subject {
+        validate_subject(subject.as_deref())?;
     }
     if let Some(Some(concern_id)) = input.concern_id {
         concern::require(db, concern_id).await?;
@@ -338,6 +362,66 @@ mod tests {
         assert_eq!(updated.topic, before.topic);
         assert_eq!(updated.source_quote, before.source_quote);
         assert!(updated.updated_at > before.updated_at);
+    }
+
+    /// The domain guard behind the MCP-boundary canonicalization (ADR-0004
+    /// §2): "self" or blank must never persist as a stored subject, no
+    /// matter which write path a future surface takes.
+    #[tokio::test]
+    async fn record_batch_rejects_reserved_or_blank_subject() {
+        let db = test_db().await;
+        let mut reserved = father_afib();
+        reserved.subject = Some(" SELF ".to_owned());
+        assert!(
+            record_batch(&db, vec![reserved]).await.is_err(),
+            "the reserved literal must be rejected regardless of case/padding"
+        );
+        let mut blank = father_afib();
+        blank.subject = Some("   ".to_owned());
+        assert!(
+            record_batch(&db, vec![blank]).await.is_err(),
+            "a blank subject must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_rejects_reserved_or_blank_subject_but_allows_clear() {
+        let db = test_db().await;
+        let saved = record_batch(&db, vec![father_afib()])
+            .await
+            .expect("record");
+        let reserved = update(
+            &db,
+            saved[0].id,
+            UpdateClaim {
+                subject: Some(Some("self".to_owned())),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(reserved.is_err(), "literal 'self' must not persist");
+        let blank = update(
+            &db,
+            saved[0].id,
+            UpdateClaim {
+                subject: Some(Some(" ".to_owned())),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(blank.is_err(), "blank subject must not persist");
+        // Some(None) stays the legitimate domain-level clear.
+        let cleared = update(
+            &db,
+            saved[0].id,
+            UpdateClaim {
+                subject: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("clear via Some(None)");
+        assert_eq!(cleared.subject, None);
     }
 
     #[tokio::test]

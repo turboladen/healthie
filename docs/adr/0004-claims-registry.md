@@ -52,6 +52,15 @@ registry, which stores only what was claimed. `FamilyEvent` (ADR-0002) remains
 reserved for _ongoing_ family context (an illness in progress), distinct from these
 historical family claims.
 
+The literal **"self" is a reserved word** on this contract (trimmed, ASCII
+case-insensitive): the MCP create path canonicalizes "self" and blank subjects
+to absent, the read filter treats them as the about-Steve scope, `update_claim`
+accepts "self" as the one clear-to-NULL affordance, and the domain services
+reject "self" or blank as a _stored_ value outright — so no write path, current
+or future, can persist a claim that is invisible to the self scope. (Like
+`source_quote` immutability in §4, part of this is enforced by shape and part
+by the service guard — documented here so neither half is "fixed" away later.)
+
 ### 3. Sessionless intake — coverage derived from the registry
 
 There are no intake-session tables. `run_baseline_intake` computes per-category

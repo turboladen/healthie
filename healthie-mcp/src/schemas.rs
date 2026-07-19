@@ -337,20 +337,26 @@ pub struct RecordPlanOutcomeInput {
     pub note: Option<String>,
 }
 
-/// The read filter reserves the literal "self" for claims about Steve, which
-/// are STORED with subject = NULL. Normalize on every write path so a model
-/// that sends subject:"self" cannot create a row invisible to the self filter.
-fn normalize_subject(subject: Option<String>) -> Option<String> {
-    subject.and_then(normalize_subject_value)
+/// The literal "self" is a RESERVED word on the claim-subject contract:
+/// claims about Steve are STORED with subject = NULL. One predicate defines
+/// the sentinel (trimmed, ASCII case-insensitive) so the create, update, and
+/// read paths can never disagree on what counts as "self" — the services
+/// additionally reject the literal at the domain layer (ADR-0004 §2).
+fn is_self_sentinel(subject: &str) -> bool {
+    subject.trim().eq_ignore_ascii_case("self")
 }
 
-/// Single-value form: "self" (any case) means about-Steve, stored as NULL.
-fn normalize_subject_value(subject: String) -> Option<String> {
-    if subject.eq_ignore_ascii_case("self") {
-        None
-    } else {
-        Some(subject)
-    }
+/// CREATE-path canonicalizer: "self" (any case) and blank both mean
+/// about-Steve → None; anything else is a relative name, stored trimmed.
+fn normalize_new_subject(subject: Option<String>) -> Option<String> {
+    subject.and_then(|s| {
+        let trimmed = s.trim();
+        if trimmed.is_empty() || is_self_sentinel(trimmed) {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    })
 }
 
 /// One claim as captured during intake. Statement is the distilled record;
@@ -363,8 +369,8 @@ pub struct ClaimInput {
     /// How sure Steve is: verified (records seen) / recalled (memory) /
     /// unknown (a task to resolve) / not-done (confirmed never happened).
     pub confidence: ClaimConfidence,
-    /// Omit when the claim is about Steve ("self" is treated as omitted);
-    /// else the relative ("father").
+    /// Omit when the claim is about Steve ("self" or blank is treated as
+    /// omitted); else the relative ("father").
     pub subject: Option<String>,
     /// Normalizable key for rules to query later, e.g. "colonoscopy".
     pub topic: Option<String>,
@@ -384,7 +390,7 @@ impl ClaimInput {
             category: self.category,
             statement: self.statement,
             confidence: self.confidence,
-            subject: normalize_subject(self.subject),
+            subject: normalize_new_subject(self.subject),
             topic: self.topic,
             occurred_on: self.occurred_on,
             source_quote: self.source_quote,
@@ -396,8 +402,9 @@ impl ClaimInput {
 /// Record a batch of intake claims. Read them back to Steve BEFORE calling.
 #[derive(Deserialize, JsonSchema)]
 pub struct RecordIntakeAnswersInput {
-    /// Absent and empty both surface the same actionable domain error.
-    #[serde(default)]
+    /// Required in the advertised schema on purpose: for an LLM caller the
+    /// schema is the primary coaching surface, so `claims` stays in the
+    /// `required` list (a missing key gets the schema-hint error instead).
     pub claims: Vec<ClaimInput>,
 }
 
@@ -431,8 +438,12 @@ impl UpdateClaimInput {
                 statement: self.statement,
                 confidence: self.confidence,
                 // "self" → Some(None): clears subject to NULL, reclassifying
-                // the claim as about Steve — the one clear affordance here.
-                subject: self.subject.map(normalize_subject_value),
+                // the claim as about Steve — the ONE clear affordance here.
+                // Blank is deliberately NOT a clear: it passes through so the
+                // service rejects it loudly (ambiguous intent ≠ silent wipe).
+                subject: self
+                    .subject
+                    .map(|s| if is_self_sentinel(&s) { None } else { Some(s) }),
                 topic: self.topic.map(Some),
                 occurred_on: self.occurred_on.map(Some),
                 concern_id: self.concern_id.map(Some),
@@ -446,8 +457,8 @@ impl UpdateClaimInput {
 pub struct GetClaimsInput {
     pub category: Option<ClaimCategory>,
     pub confidence: Option<ClaimConfidence>,
-    /// "self" → only claims about Steve; any other value → that relative
-    /// (e.g. "father"); omit → all subjects.
+    /// "self" (any case) → only claims about Steve; any other value → that
+    /// relative (e.g. "father"); omit → all subjects.
     pub subject: Option<String>,
 }
 
@@ -457,9 +468,16 @@ impl GetClaimsInput {
         ClaimFilter {
             category: self.category,
             confidence: self.confidence,
-            subject: self
-                .subject
-                .map(|s| if s == "self" { None } else { Some(s) }),
+            // Same sentinel predicate as the write paths — read and write
+            // can never disagree on what "self" means (blank ≡ self here).
+            subject: self.subject.map(|s| {
+                let trimmed = s.trim();
+                if trimmed.is_empty() || is_self_sentinel(trimmed) {
+                    None
+                } else {
+                    Some(trimmed.to_owned())
+                }
+            }),
         }
     }
 }

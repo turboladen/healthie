@@ -3,7 +3,9 @@
 //! primary record; `topic`/`occurred_on` give M3's screening rules something
 //! queryable; `source_quote` is immutable provenance — the verbatim words the
 //! claim was distilled from, so calibration drift stays visible; `subject`
-//! absent means the claim is about Steve, else the relative ("father").
+//! absent means the claim is about Steve, else the relative ("father") — the
+//! literal "self" is reserved (canonicalized to absent at the MCP boundary,
+//! rejected as a stored value by the services; ADR-0004 §2).
 
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
