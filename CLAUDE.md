@@ -64,9 +64,11 @@ cargo clippy --workspace --all-targets --locked -- -D warnings -D clippy::pedant
 Personal health system-of-record per `../personal-domain-pattern`; the durable vision
 and decisions live in `docs/adr/` (start with ADR-0002, deviations in ADR-0003+).
 Cargo workspace: `healthie-shared` (SeaORM/SQLite domain lib — entities, migrations,
-services, briefing assembler) is live; `healthie-mcp` (M1b) is live — an rmcp
-stateless streamable-HTTP server exposing 15 tools, the `healthie://briefing`
-resource, and the `checkin` prompt, gated by bearer-token auth (singleton
+services, briefing assembler, claims registry) is live; `healthie-mcp` (M1b/M1c) is
+live — an rmcp stateless streamable-HTTP server exposing 19 tools (incl. the M1c
+claims-with-confidence intake — `run_baseline_intake` / `record_intake_answers` /
+`update_claim` / `get_claims`, ADR-0004), the `healthie://briefing` resource, and
+the `checkin` + `baseline_intake` prompts, gated by bearer-token auth (singleton
 `mcp_token` service). It ships as a library `router()` (M2's `healthie-backend`
 will `nest_service` it) plus a binary (`healthie-mcp serve|token provision|revoke`)
 that hosts it until the backend exists. `healthie-backend` + Svelte SPA (M2+) to

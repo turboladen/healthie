@@ -1011,6 +1011,8 @@ async fn instructions_teach_the_loop() {
         "record_plan_outcome",
         "commit_plan",
         "complete_checkin",
+        "run_baseline_intake",
+        "get_claims",
         "checkin",
     ] {
         assert!(body.contains(marker), "instructions must mention {marker}");

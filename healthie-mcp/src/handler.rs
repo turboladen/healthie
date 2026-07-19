@@ -400,7 +400,7 @@ impl HealthieMcp {
 
     #[tool(
         name = "update_claim",
-        description = "Revise a claim: fix a mis-calibrated statement, upgrade confidence \
+        description = "Revise a claim: fix a miscalibrated statement, upgrade confidence \
             after records are checked (unknown → verified), or downgrade an overstated \
             one. source_quote is immutable evidence and cannot be changed.",
         input_schema = rmcp::handler::server::common::schema_for_type::<UpdateClaimInput>()
@@ -466,9 +466,15 @@ impl ServerHandler for HealthieMcp {
                  discrete to-do, guidance/nutrition → direction on the plan itself); healthie's \
                  copy is the source of truth, external pushes happen at the conversation layer. \
                  (6) CLOSE — complete_checkin with a summary the next checkin's accountability \
-                 pass will read aloud. The `checkin` prompt scripts this whole flow. Cadence- \
-                 agnostic: a checkin covers 'since the last checkin'. update_profile for standing \
-                 facts. All dates YYYY-MM-DD; timestamps RFC 3339 UTC.",
+                 pass will read aloud. BASELINE — the claims registry holds health history as \
+                 claims with honest confidence (verified/recalled/unknown/not-done), with \
+                 source_quote provenance: run_baseline_intake shows coverage gaps; \
+                 record_intake_answers captures claims (read them back first); update_claim \
+                 revises/resolves; get_claims reads the registry — consult it before reasoning \
+                 about history, risk, or screenings. The baseline_intake prompt scripts one \
+                 sitting. The `checkin` prompt scripts this whole flow. Cadence- agnostic: a \
+                 checkin covers 'since the last checkin'. update_profile for standing facts. All \
+                 dates YYYY-MM-DD; timestamps RFC 3339 UTC.",
             )
     }
 
