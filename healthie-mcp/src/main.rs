@@ -14,6 +14,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
+        // Logs to stderr so `token provision` stdout carries ONLY the token
+        // lines (healthie-pms: fmt() defaults to stdout).
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
