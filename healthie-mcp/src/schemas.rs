@@ -337,6 +337,22 @@ pub struct RecordPlanOutcomeInput {
     pub note: Option<String>,
 }
 
+/// The read filter reserves the literal "self" for claims about Steve, which
+/// are STORED with subject = NULL. Normalize on every write path so a model
+/// that sends subject:"self" cannot create a row invisible to the self filter.
+fn normalize_subject(subject: Option<String>) -> Option<String> {
+    subject.and_then(normalize_subject_value)
+}
+
+/// Single-value form: "self" (any case) means about-Steve, stored as NULL.
+fn normalize_subject_value(subject: String) -> Option<String> {
+    if subject.eq_ignore_ascii_case("self") {
+        None
+    } else {
+        Some(subject)
+    }
+}
+
 /// One claim as captured during intake. Statement is the distilled record;
 /// quote is the verbatim words it came from.
 #[derive(Deserialize, JsonSchema)]
@@ -347,7 +363,8 @@ pub struct ClaimInput {
     /// How sure Steve is: verified (records seen) / recalled (memory) /
     /// unknown (a task to resolve) / not-done (confirmed never happened).
     pub confidence: ClaimConfidence,
-    /// Omit when the claim is about Steve; else the relative ("father").
+    /// Omit when the claim is about Steve ("self" is treated as omitted);
+    /// else the relative ("father").
     pub subject: Option<String>,
     /// Normalizable key for rules to query later, e.g. "colonoscopy".
     pub topic: Option<String>,
@@ -367,7 +384,7 @@ impl ClaimInput {
             category: self.category,
             statement: self.statement,
             confidence: self.confidence,
-            subject: self.subject,
+            subject: normalize_subject(self.subject),
             topic: self.topic,
             occurred_on: self.occurred_on,
             source_quote: self.source_quote,
@@ -379,12 +396,16 @@ impl ClaimInput {
 /// Record a batch of intake claims. Read them back to Steve BEFORE calling.
 #[derive(Deserialize, JsonSchema)]
 pub struct RecordIntakeAnswersInput {
+    /// Absent and empty both surface the same actionable domain error.
+    #[serde(default)]
     pub claims: Vec<ClaimInput>,
 }
 
 /// Revise a claim (fix calibration, resolve an unknown). `source_quote` is
 /// immutable evidence and cannot be changed. Set-only: omitted fields are
-/// untouched.
+/// untouched, and clearing a stored value is not expressible on the MCP
+/// surface (matches `update_profile`) — with one exception: `subject`
+/// accepts "self" to reclassify a claim as being about Steve.
 #[derive(Deserialize, JsonSchema)]
 pub struct UpdateClaimInput {
     /// From `get_claims` / `record_intake_answers` / the briefing.
@@ -392,6 +413,8 @@ pub struct UpdateClaimInput {
     pub category: Option<ClaimCategory>,
     pub statement: Option<String>,
     pub confidence: Option<ClaimConfidence>,
+    /// The relative this claim is about — or "self" to reclassify the claim
+    /// as being about Steve (stores NULL).
     pub subject: Option<String>,
     pub topic: Option<String>,
     pub occurred_on: Option<NaiveDate>,
@@ -407,7 +430,9 @@ impl UpdateClaimInput {
                 category: self.category,
                 statement: self.statement,
                 confidence: self.confidence,
-                subject: self.subject.map(Some),
+                // "self" → Some(None): clears subject to NULL, reclassifying
+                // the claim as about Steve — the one clear affordance here.
+                subject: self.subject.map(normalize_subject_value),
                 topic: self.topic.map(Some),
                 occurred_on: self.occurred_on.map(Some),
                 concern_id: self.concern_id.map(Some),

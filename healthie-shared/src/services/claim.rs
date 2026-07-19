@@ -22,8 +22,8 @@ use crate::{
 #[derive(Debug, Serialize)]
 pub struct CategoryCoverage {
     pub category: ClaimCategory,
-    pub claims: u64,
-    pub unknowns: u64,
+    pub claims: usize,
+    pub unknowns: usize,
     pub last_touched: Option<DateTime<Utc>>,
 }
 
@@ -180,8 +180,8 @@ pub async fn coverage(db: &impl ConnectionTrait) -> DomainResult<Vec<CategoryCov
                 .count();
             CategoryCoverage {
                 category,
-                claims: u64::try_from(in_category.len()).unwrap_or(u64::MAX),
-                unknowns: u64::try_from(unknowns).unwrap_or(u64::MAX),
+                claims: in_category.len(),
+                unknowns,
                 last_touched: in_category.iter().map(|c| c.updated_at).max(),
             }
         })

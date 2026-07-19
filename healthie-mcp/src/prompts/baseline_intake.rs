@@ -51,13 +51,7 @@ mod tests {
             "update_claim",
             "run_baseline_intake",
         ];
-        let mut last = 0;
-        for (i, tool) in order.iter().enumerate() {
-            let pos = body[last..].find(tool).unwrap_or_else(|| {
-                panic!("body must mention {tool} (occurrence {i}) after byte {last}")
-            });
-            last += pos + tool.len();
-        }
+        crate::prompts::assert_scripts_in_order(&body, &order);
         for marker in [
             "verified",
             "recalled",
@@ -67,6 +61,24 @@ mod tests {
             "READ BACK",
         ] {
             assert!(body.contains(marker), "body must mention {marker}");
+        }
+    }
+
+    /// Ties the hand-written confidence prose to the `ClaimConfidence` enum —
+    /// a vocabulary change updates the schemars schema automatically but
+    /// would otherwise leave this coaching prose stale and untested.
+    #[test]
+    fn body_covers_every_confidence_value() {
+        use healthie_shared::entities::claim::ClaimConfidence;
+        use sea_orm::strum::IntoEnumIterator;
+        let body = render(None);
+        for confidence in ClaimConfidence::iter() {
+            let wire = serde_json::to_value(confidence).expect("serialize variant");
+            let wire = wire.as_str().expect("wire value is a string");
+            assert!(
+                body.contains(wire),
+                "prompt body must mention confidence value {wire}"
+            );
         }
     }
 

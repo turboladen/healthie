@@ -61,7 +61,10 @@ pub enum ClaimCategory {
     #[sea_orm(string_value = "lifestyle")]
     #[serde(rename = "lifestyle")]
     Lifestyle,
-    /// Quarantine, never drop: anything the vocabulary didn't anticipate.
+    /// Coached catch-all for anything the vocabulary didn't anticipate.
+    /// (Out-of-vocabulary category VALUES are rejected at the schema
+    /// boundary with a retryable error — never silently dropped or coerced;
+    /// see ADR-0004 §5.)
     #[sea_orm(string_value = "general")]
     #[serde(rename = "general")]
     General,

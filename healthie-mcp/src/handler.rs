@@ -47,8 +47,8 @@ pub struct HealthieMcp {
 #[derive(Serialize)]
 struct IntakeState {
     coverage: Vec<claim::CategoryCoverage>,
-    total_claims: u64,
-    total_unknowns: u64,
+    total_claims: usize,
+    total_unknowns: usize,
 }
 
 #[tool_router]

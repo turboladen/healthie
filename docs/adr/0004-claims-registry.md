@@ -87,10 +87,16 @@ evidence — but transcripts are evidence nobody re-reads. So instead:
 Eleven categories, in the ADR-0003 house style (`DeriveActiveEnum`, kebab-case
 serde, `EnumIter`, feature-gated `JsonSchema`): `family-history`, `condition`,
 `surgery`, `injury`, `screening`, `medication`, `supplement`, `allergy`,
-`mental-health`, `lifestyle`, `general`. `general` is a **quarantine, never a
-drop** — anything the vocabulary didn't anticipate lands there rather than being
-discarded, the same never-silently-drop discipline ADR-0002 applies to unknown HAE
-metric kinds.
+`mental-health`, `lifestyle`, `general`. `general` is the **coached
+destination** for anything the vocabulary didn't anticipate — the model is
+instructed to file odd-shaped claims there rather than force-fitting or
+skipping them. The vocabulary itself stays closed (ADR-0003): a category value
+outside it is rejected at the schema boundary with an actionable, retryable
+tool error — nothing is silently dropped, and nothing unanticipated is
+silently persisted either. (This is the conversational-surface variant of
+ADR-0002's HAE quarantine discipline; HAE must quarantine server-side because
+ingest has no retry loop, whereas the MCP surface has an interactive caller
+that can correct and resend.)
 
 The briefing surfaces only `claims_needing_resolution` (confidence = `unknown`) —
 "a task to resolve, never a nag" (ADR-0002). Coverage _gaps_ stay out of the

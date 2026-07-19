@@ -67,6 +67,21 @@ impl HealthieMcp {
     }
 }
 
+/// Shared test assertion: every token in `order` appears in `body`, in order,
+/// with the cursor advancing past each match — so REPEATED tokens are
+/// verified as separate occurrences (an absolute `find` cannot do that; see
+/// the `baseline_intake` test, whose order repeats `run_baseline_intake`).
+#[cfg(test)]
+pub(crate) fn assert_scripts_in_order(body: &str, order: &[&str]) {
+    let mut last = 0;
+    for (i, token) in order.iter().enumerate() {
+        let pos = body[last..].find(token).unwrap_or_else(|| {
+            panic!("body must mention {token} (occurrence index {i}) after byte {last}")
+        });
+        last += pos + token.len();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

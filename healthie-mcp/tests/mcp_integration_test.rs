@@ -850,6 +850,88 @@ async fn record_intake_answers_rejects_empty_batch_as_tool_error() {
     .await;
     let (is_error, _) = tool_result(&body);
     assert!(is_error, "empty batch must surface as a tool-level error");
+
+    // An entirely absent `claims` key must land on the SAME actionable
+    // domain error, not a generic serde missing-field message
+    // (#[serde(default)] routes it to record_batch's validation).
+    let body = post_rpc(&app, &token, call_tool("record_intake_answers", json!({}))).await;
+    let (is_error, text) = tool_result(&body);
+    assert!(
+        is_error,
+        "absent claims key must surface as a tool-level error"
+    );
+    assert!(
+        text.contains("at least one claim"),
+        "absent key should reach the domain error, got: {text}"
+    );
+}
+
+/// The "self" sentinel must be honored on WRITE paths too: storing
+/// subject:"self" as NULL keeps the claim visible to the self filter, and
+/// `update_claim`'s subject:"self" reclassifies a misattributed claim.
+#[tokio::test]
+async fn subject_self_is_normalized_on_write_and_update() {
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
+
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool(
+            "record_intake_answers",
+            json!({
+                "claims": [
+                    { "category": "lifestyle", "statement": "Walks most mornings",
+                      "confidence": "recalled", "subject": "self" },
+                    { "category": "family-history", "statement": "Mother: hypertension",
+                      "confidence": "recalled", "subject": "mother" }
+                ]
+            }),
+        ),
+    )
+    .await;
+    let saved = tool_payload(&body);
+    assert!(
+        saved[0]["subject"].is_null(),
+        "subject 'self' must store as NULL"
+    );
+    let mother_id = saved[1]["id"].as_i64().expect("id");
+
+    // The self-scoped read must see the normalized claim.
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool("get_claims", json!({ "subject": "self" })),
+    )
+    .await;
+    let self_claims = tool_payload(&body);
+    assert_eq!(self_claims.as_array().expect("claims").len(), 1);
+    assert_eq!(self_claims[0]["statement"], "Walks most mornings");
+
+    // Reclassify the misattributed claim to Steve via subject "self".
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool(
+            "update_claim",
+            json!({
+                "claim_id": mother_id, "subject": "self"
+            }),
+        ),
+    )
+    .await;
+    assert!(
+        tool_payload(&body)["subject"].is_null(),
+        "'self' must clear subject to NULL"
+    );
+
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool("get_claims", json!({ "subject": "self" })),
+    )
+    .await;
+    assert_eq!(tool_payload(&body).as_array().expect("claims").len(), 2);
 }
 
 #[tokio::test]
