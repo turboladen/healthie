@@ -7,6 +7,7 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use healthie_shared::{
     entities::{
+        claim::{ClaimCategory, ClaimConfidence},
         concern::ConcernStatus,
         concern_tag::ConcernTag,
         goal::GoalComparison,
@@ -17,6 +18,7 @@ use healthie_shared::{
         protocol::{ProtocolKind, ProtocolVerdict},
     },
     inputs::{
+        claim::{ClaimFilter, NewClaim, UpdateClaim},
         concern::NewConcern,
         goal::NewGoal,
         observation::NewObservation,
@@ -325,4 +327,106 @@ pub struct RecordPlanOutcomeInput {
     pub status: OutcomeStatus,
     /// Context: why skipped, how partial, etc.
     pub note: Option<String>,
+}
+
+/// One claim as captured during intake. Statement is the distilled record;
+/// quote is the verbatim words it came from.
+#[derive(Deserialize, JsonSchema)]
+pub struct ClaimInput {
+    pub category: ClaimCategory,
+    /// The distilled claim, in plain words.
+    pub statement: String,
+    /// How sure Steve is: verified (records seen) / recalled (memory) /
+    /// unknown (a task to resolve) / not-done (confirmed never happened).
+    pub confidence: ClaimConfidence,
+    /// Omit when the claim is about Steve; else the relative ("father").
+    pub subject: Option<String>,
+    /// Normalizable key for rules to query later, e.g. "colonoscopy".
+    pub topic: Option<String>,
+    /// When the claimed thing happened, if dateable (YYYY-MM-DD).
+    pub occurred_on: Option<NaiveDate>,
+    /// Verbatim (or near-verbatim) words that produced this claim —
+    /// provenance that travels with it. Strongly encouraged.
+    pub source_quote: Option<String>,
+    /// Link to a concern id when clearly related.
+    pub concern_id: Option<i32>,
+}
+
+impl ClaimInput {
+    #[must_use]
+    pub fn into_domain(self) -> NewClaim {
+        NewClaim {
+            category: self.category,
+            statement: self.statement,
+            confidence: self.confidence,
+            subject: self.subject,
+            topic: self.topic,
+            occurred_on: self.occurred_on,
+            source_quote: self.source_quote,
+            concern_id: self.concern_id,
+        }
+    }
+}
+
+/// Record a batch of intake claims. Read them back to Steve BEFORE calling.
+#[derive(Deserialize, JsonSchema)]
+pub struct RecordIntakeAnswersInput {
+    pub claims: Vec<ClaimInput>,
+}
+
+/// Revise a claim (fix calibration, resolve an unknown). `source_quote` is
+/// immutable evidence and cannot be changed. Set-only: omitted fields are
+/// untouched.
+#[derive(Deserialize, JsonSchema)]
+pub struct UpdateClaimInput {
+    /// From `get_claims` / `record_intake_answers` / the briefing.
+    pub claim_id: i32,
+    pub category: Option<ClaimCategory>,
+    pub statement: Option<String>,
+    pub confidence: Option<ClaimConfidence>,
+    pub subject: Option<String>,
+    pub topic: Option<String>,
+    pub occurred_on: Option<NaiveDate>,
+    pub concern_id: Option<i32>,
+}
+
+impl UpdateClaimInput {
+    #[must_use]
+    pub fn into_domain(self) -> (i32, UpdateClaim) {
+        (
+            self.claim_id,
+            UpdateClaim {
+                category: self.category,
+                statement: self.statement,
+                confidence: self.confidence,
+                subject: self.subject.map(Some),
+                topic: self.topic.map(Some),
+                occurred_on: self.occurred_on.map(Some),
+                concern_id: self.concern_id.map(Some),
+            },
+        )
+    }
+}
+
+/// Read the claims registry with optional filters.
+#[derive(Deserialize, JsonSchema)]
+pub struct GetClaimsInput {
+    pub category: Option<ClaimCategory>,
+    pub confidence: Option<ClaimConfidence>,
+    /// "self" → only claims about Steve; any other value → that relative
+    /// (e.g. "father"); omit → all subjects.
+    pub subject: Option<String>,
+}
+
+impl GetClaimsInput {
+    #[must_use]
+    pub fn into_domain(self) -> ClaimFilter {
+        ClaimFilter {
+            category: self.category,
+            confidence: self.confidence,
+            subject: self
+                .subject
+                .map(|s| if s == "self" { None } else { Some(s) }),
+        }
+    }
 }

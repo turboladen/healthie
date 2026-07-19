@@ -8,7 +8,7 @@ use std::sync::Arc;
 use healthie_shared::{
     clock,
     error::{DomainError, DomainResult},
-    services::{briefing, checkin, concern, goal, observation, plan, profile, protocol},
+    services::{briefing, checkin, claim, concern, goal, observation, plan, profile, protocol},
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -26,10 +26,10 @@ use sea_orm::DatabaseConnection;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::schemas::{
-    CommitPlanInput, CompleteCheckinInput, EmptyParams, LogObservationInput, LogSymptomInput,
-    OpenConcernInput, RecordCheckinResponseInput, RecordPlanOutcomeInput,
-    RecordProtocolOutcomeInput, SetGoalInput, StartProtocolInput, UpdateConcernStatusInput,
-    UpdateProfileInput,
+    ClaimInput, CommitPlanInput, CompleteCheckinInput, EmptyParams, GetClaimsInput,
+    LogObservationInput, LogSymptomInput, OpenConcernInput, RecordCheckinResponseInput,
+    RecordIntakeAnswersInput, RecordPlanOutcomeInput, RecordProtocolOutcomeInput, SetGoalInput,
+    StartProtocolInput, UpdateClaimInput, UpdateConcernStatusInput, UpdateProfileInput,
 };
 
 /// The one M1b resource. Per-concern dossiers and goal progress are follow-ups
@@ -39,6 +39,16 @@ pub const BRIEFING_URI: &str = "healthie://briefing";
 #[derive(Clone)]
 pub struct HealthieMcp {
     db: Arc<DatabaseConnection>,
+}
+
+/// The `run_baseline_intake` payload: per-category coverage plus registry-wide
+/// totals, all derived from the claims themselves (the sessionless intake
+/// state, ADR-0004).
+#[derive(Serialize)]
+struct IntakeState {
+    coverage: Vec<claim::CategoryCoverage>,
+    total_claims: u64,
+    total_unknowns: u64,
 }
 
 #[tool_router]
@@ -330,6 +340,99 @@ impl HealthieMcp {
             Err(e) => return Ok(e),
         };
         domain_result(observation::log(&*self.db, input.into_domain()).await)
+    }
+
+    #[tool(
+        name = "run_baseline_intake",
+        description = "Orient the baseline intake: per-category coverage of the claims \
+            registry (claim count, unknowns to resolve, last touched — zero-claim \
+            categories are the never-visited areas). The baseline is a state of \
+            completeness, not an event: pick 1-2 gap areas per sitting. Use the \
+            baseline_intake prompt to script a sitting.",
+        input_schema = rmcp::handler::server::common::schema_for_type::<EmptyParams>()
+    )]
+    async fn run_baseline_intake(
+        &self,
+        params: LenientParameters<EmptyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let EmptyParams {} = match params.into_tool_input("run_baseline_intake") {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+        match claim::coverage(&*self.db).await {
+            Ok(coverage) => {
+                let total_claims = coverage.iter().map(|c| c.claims).sum();
+                let total_unknowns = coverage.iter().map(|c| c.unknowns).sum();
+                tool_json_result(&IntakeState {
+                    coverage,
+                    total_claims,
+                    total_unknowns,
+                })
+            }
+            Err(err) => domain_error(err),
+        }
+    }
+
+    #[tool(
+        name = "record_intake_answers",
+        description = "Persist a batch of intake claims — what Steve CLAIMS, with honest \
+            confidence (verified/recalled/unknown/not-done), never laundered into facts. \
+            READ THE CLAIMS BACK to Steve before calling: an off-hand exaggeration must \
+            not become canon. Include source_quote (his verbatim words) on every claim \
+            you can. unknown = a task to resolve, never a nag.",
+        input_schema = rmcp::handler::server::common::schema_for_type::<RecordIntakeAnswersInput>()
+    )]
+    async fn record_intake_answers(
+        &self,
+        params: LenientParameters<RecordIntakeAnswersInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = match params.into_tool_input("record_intake_answers") {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+        let claims = input
+            .claims
+            .into_iter()
+            .map(ClaimInput::into_domain)
+            .collect();
+        domain_result(claim::record_batch(&*self.db, claims).await)
+    }
+
+    #[tool(
+        name = "update_claim",
+        description = "Revise a claim: fix a mis-calibrated statement, upgrade confidence \
+            after records are checked (unknown → verified), or downgrade an overstated \
+            one. source_quote is immutable evidence and cannot be changed.",
+        input_schema = rmcp::handler::server::common::schema_for_type::<UpdateClaimInput>()
+    )]
+    async fn update_claim(
+        &self,
+        params: LenientParameters<UpdateClaimInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = match params.into_tool_input("update_claim") {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+        let (id, update) = input.into_domain();
+        domain_result(claim::update(&*self.db, id, update).await)
+    }
+
+    #[tool(
+        name = "get_claims",
+        description = "Read the claims registry, newest first, optionally filtered by \
+            category, confidence, or subject ('self' = about Steve; 'father' etc. = \
+            family history). Consult before reasoning about history, risk, or screenings.",
+        input_schema = rmcp::handler::server::common::schema_for_type::<GetClaimsInput>()
+    )]
+    async fn get_claims(
+        &self,
+        params: LenientParameters<GetClaimsInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = match params.into_tool_input("get_claims") {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+        domain_result(claim::list(&*self.db, input.into_domain()).await)
     }
 }
 
