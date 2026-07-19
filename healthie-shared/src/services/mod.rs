@@ -1,5 +1,6 @@
 pub mod briefing;
 pub mod checkin;
+pub mod claim;
 pub mod concern;
 pub mod goal;
 pub mod mcp_token;
