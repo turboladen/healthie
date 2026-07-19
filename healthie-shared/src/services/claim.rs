@@ -80,8 +80,8 @@ pub async fn record_batch<C: ConnectionTrait + TransactionTrait>(
 /// evidence the claim was distilled from.
 ///
 /// # Errors
-/// `NotFound` for a missing id; `Invalid` for a blank `statement` or missing
-/// `concern_id` target; `Db` on database errors.
+/// `Invalid` for a blank `statement`; `NotFound` for a missing claim id or a
+/// missing `concern_id` target; `Db` on database errors.
 pub async fn update(
     db: &impl ConnectionTrait,
     id: i32,
@@ -245,12 +245,33 @@ mod tests {
         blank.statement = "   ".to_owned();
         let result = record_batch(&db, vec![colonoscopy_unknown(), blank]).await;
         assert!(result.is_err(), "blank statement is Invalid");
-        // txn atomicity: the valid claim must NOT have been persisted
+        // Statement validation is pre-txn (before begin), so nothing is even
+        // attempted — this pins pre-txn rejection, not rollback. In-txn
+        // rollback is covered by record_batch_rolls_back_inserted_claims.
         assert!(
             list(&db, ClaimFilter::default())
                 .await
                 .expect("list")
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn record_batch_rolls_back_inserted_claims() {
+        let db = test_db().await;
+        // First claim is valid and gets inserted inside the txn; the second
+        // fails concern::require AFTER that insert. The commit never runs, so
+        // the already-inserted first claim must be rolled back.
+        let mut second = father_afib();
+        second.concern_id = Some(9999);
+        let result = record_batch(&db, vec![colonoscopy_unknown(), second]).await;
+        assert!(result.is_err(), "missing concern must fail the batch");
+        assert!(
+            list(&db, ClaimFilter::default())
+                .await
+                .expect("list")
+                .is_empty(),
+            "an in-txn failure must roll back the already-inserted claim"
         );
     }
 
