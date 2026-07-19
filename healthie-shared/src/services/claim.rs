@@ -297,7 +297,7 @@ mod tests {
         assert_eq!(updated.confidence, ClaimConfidence::Verified);
         // provenance untouched (and untouchable — UpdateClaim has no field for it)
         assert_eq!(updated.source_quote, saved[0].source_quote);
-        assert!(updated.updated_at >= saved[0].updated_at);
+        assert!(updated.updated_at > saved[0].updated_at);
     }
 
     #[tokio::test]
@@ -316,7 +316,7 @@ mod tests {
         assert_eq!(updated.subject, before.subject);
         assert_eq!(updated.topic, before.topic);
         assert_eq!(updated.source_quote, before.source_quote);
-        assert!(updated.updated_at >= before.updated_at);
+        assert!(updated.updated_at > before.updated_at);
     }
 
     #[tokio::test]
@@ -458,8 +458,8 @@ mod tests {
             .last_touched
             .expect("touched");
         assert!(
-            after >= before,
-            "last_touched must track updated_at across a revision"
+            after > before,
+            "last_touched must track updated_at (not created_at) across a revision"
         );
     }
 }

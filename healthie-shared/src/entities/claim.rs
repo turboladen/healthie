@@ -92,3 +92,36 @@ pub enum ClaimConfidence {
 pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
+
+#[cfg(all(test, feature = "schemars"))]
+mod schemars_tests {
+    use super::*;
+
+    /// The advertised schema must carry the serde wire values (kebab-case),
+    /// not the Rust variant names — the MCP intake surface depends on this,
+    /// and these enums are hand-authored with per-variant renames.
+    #[test]
+    fn claim_category_schema_uses_wire_values() {
+        let schema = schemars::schema_for!(ClaimCategory);
+        let json = serde_json::to_string(&schema).expect("serialize schema");
+        assert!(json.contains("\"family-history\""));
+        assert!(json.contains("\"mental-health\""));
+        assert!(json.contains("\"general\""));
+        assert!(
+            !json.contains("FamilyHistory"),
+            "Rust variant name leaked into schema"
+        );
+    }
+
+    #[test]
+    fn claim_confidence_schema_uses_wire_values() {
+        let schema = schemars::schema_for!(ClaimConfidence);
+        let json = serde_json::to_string(&schema).expect("serialize schema");
+        assert!(json.contains("\"verified\""));
+        assert!(json.contains("\"not-done\""));
+        assert!(
+            !json.contains("NotDone"),
+            "Rust variant name leaked into schema"
+        );
+    }
+}
