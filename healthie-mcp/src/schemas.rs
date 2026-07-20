@@ -7,6 +7,7 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use healthie_shared::{
     entities::{
+        claim::{ClaimCategory, ClaimConfidence},
         concern::ConcernStatus,
         concern_tag::ConcernTag,
         goal::GoalComparison,
@@ -17,6 +18,7 @@ use healthie_shared::{
         protocol::{ProtocolKind, ProtocolVerdict},
     },
     inputs::{
+        claim::{ClaimFilter, NewClaim, UpdateClaim, is_self_sentinel},
         concern::NewConcern,
         goal::NewGoal,
         observation::NewObservation,
@@ -37,6 +39,14 @@ pub struct EmptyParams {}
 pub struct CheckinPromptArgs {
     /// Anything specific on your mind to start from (optional).
     pub focus: Option<String>,
+}
+
+/// Arguments for the `baseline_intake` prompt.
+#[derive(Deserialize, JsonSchema)]
+pub struct BaselineIntakePromptArgs {
+    /// System area to focus this sitting on (optional) — e.g. "screenings",
+    /// "cardiovascular + family history".
+    pub area: Option<String>,
 }
 
 /// Open a new health concern — the top of the Concern → Goal → Protocol chain.
@@ -325,4 +335,134 @@ pub struct RecordPlanOutcomeInput {
     pub status: OutcomeStatus,
     /// Context: why skipped, how partial, etc.
     pub note: Option<String>,
+}
+
+/// Canonical single-value subject mapping, shared by the create path and the
+/// read filter (the sentinel predicate itself lives in healthie-shared, so
+/// the MCP boundary and the domain guard can never disagree — ADR-0004 §2):
+/// "self" (any case) and blank both mean about-Steve → None; anything else
+/// is a relative name, trimmed.
+fn canonical_subject(subject: &str) -> Option<String> {
+    let trimmed = subject.trim();
+    if trimmed.is_empty() || is_self_sentinel(trimmed) {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+/// One claim as captured during intake. Statement is the distilled record;
+/// quote is the verbatim words it came from.
+#[derive(Deserialize, JsonSchema)]
+pub struct ClaimInput {
+    pub category: ClaimCategory,
+    /// The distilled claim, in plain words.
+    pub statement: String,
+    /// How sure Steve is: verified (records seen) / recalled (memory) /
+    /// unknown (a task to resolve) / not-done (confirmed never happened).
+    pub confidence: ClaimConfidence,
+    /// Omit when the claim is about Steve ("self" or blank is treated as
+    /// omitted); else the relative ("father").
+    pub subject: Option<String>,
+    /// Normalizable key for rules to query later, e.g. "colonoscopy".
+    pub topic: Option<String>,
+    /// When the claimed thing happened, if dateable (YYYY-MM-DD).
+    pub occurred_on: Option<NaiveDate>,
+    /// Verbatim (or near-verbatim) words that produced this claim —
+    /// provenance that travels with it. Strongly encouraged.
+    pub source_quote: Option<String>,
+    /// Link to a concern id when clearly related.
+    pub concern_id: Option<i32>,
+}
+
+impl ClaimInput {
+    #[must_use]
+    pub fn into_domain(self) -> NewClaim {
+        NewClaim {
+            category: self.category,
+            statement: self.statement,
+            confidence: self.confidence,
+            subject: self.subject.and_then(|s| canonical_subject(&s)),
+            topic: self.topic,
+            occurred_on: self.occurred_on,
+            source_quote: self.source_quote,
+            concern_id: self.concern_id,
+        }
+    }
+}
+
+/// Record a batch of intake claims. Read them back to Steve BEFORE calling.
+#[derive(Deserialize, JsonSchema)]
+pub struct RecordIntakeAnswersInput {
+    /// Required in the advertised schema on purpose: for an LLM caller the
+    /// schema is the primary coaching surface, so `claims` stays in the
+    /// `required` list (a missing key gets the schema-hint error instead).
+    pub claims: Vec<ClaimInput>,
+}
+
+/// Revise a claim (fix calibration, resolve an unknown). `source_quote` is
+/// immutable evidence and cannot be changed. Set-only: omitted fields are
+/// untouched, and clearing a stored value is not expressible on the MCP
+/// surface (matches `update_profile`) — with one exception: `subject`
+/// accepts "self" to reclassify a claim as being about Steve.
+#[derive(Deserialize, JsonSchema)]
+pub struct UpdateClaimInput {
+    /// From `get_claims` / `record_intake_answers` / the briefing.
+    pub claim_id: i32,
+    pub category: Option<ClaimCategory>,
+    pub statement: Option<String>,
+    pub confidence: Option<ClaimConfidence>,
+    /// The relative this claim is about — or "self" to reclassify the claim
+    /// as being about Steve (stores NULL).
+    pub subject: Option<String>,
+    pub topic: Option<String>,
+    pub occurred_on: Option<NaiveDate>,
+    pub concern_id: Option<i32>,
+}
+
+impl UpdateClaimInput {
+    #[must_use]
+    pub fn into_domain(self) -> (i32, UpdateClaim) {
+        (
+            self.claim_id,
+            UpdateClaim {
+                category: self.category,
+                statement: self.statement,
+                confidence: self.confidence,
+                // "self" → Some(None): clears subject to NULL, reclassifying
+                // the claim as about Steve — the ONE clear affordance here.
+                // Blank is deliberately NOT a clear: it passes through so the
+                // service rejects it loudly (ambiguous intent ≠ silent wipe).
+                subject: self
+                    .subject
+                    .map(|s| if is_self_sentinel(&s) { None } else { Some(s) }),
+                topic: self.topic.map(Some),
+                occurred_on: self.occurred_on.map(Some),
+                concern_id: self.concern_id.map(Some),
+            },
+        )
+    }
+}
+
+/// Read the claims registry with optional filters.
+#[derive(Deserialize, JsonSchema)]
+pub struct GetClaimsInput {
+    pub category: Option<ClaimCategory>,
+    pub confidence: Option<ClaimConfidence>,
+    /// "self" (any case) or blank → only claims about Steve; any other value
+    /// → that relative (e.g. "father"); omit → all subjects.
+    pub subject: Option<String>,
+}
+
+impl GetClaimsInput {
+    #[must_use]
+    pub fn into_domain(self) -> ClaimFilter {
+        ClaimFilter {
+            category: self.category,
+            confidence: self.confidence,
+            // Same canonicalizer as the create path — read and write can
+            // never disagree on what a subject value means.
+            subject: self.subject.map(|s| canonical_subject(&s)),
+        }
+    }
 }

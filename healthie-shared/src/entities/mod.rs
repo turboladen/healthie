@@ -1,5 +1,6 @@
 pub mod checkin;
 pub mod checkin_response;
+pub mod claim;
 pub mod concern;
 pub mod concern_tag;
 pub mod goal;

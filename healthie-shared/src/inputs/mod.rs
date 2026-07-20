@@ -1,3 +1,4 @@
+pub mod claim;
 pub mod concern;
 pub mod goal;
 pub mod observation;

@@ -56,14 +56,7 @@ mod tests {
             "commit_plan",
             "complete_checkin",
         ];
-        let mut last = 0;
-        for tool in order {
-            let pos = body
-                .find(tool)
-                .unwrap_or_else(|| panic!("body must mention {tool}"));
-            assert!(pos > last, "{tool} out of order");
-            last = pos;
-        }
+        crate::prompts::assert_scripts_in_order(&body, &order);
     }
 
     #[test]

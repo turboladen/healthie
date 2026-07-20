@@ -2,6 +2,7 @@ use sea_orm_migration::prelude::*;
 
 mod m20260716_000001_initial_schema;
 mod m20260717_000002_mcp_token;
+mod m20260718_000003_claims;
 
 pub struct Migrator;
 
@@ -11,6 +12,7 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m20260716_000001_initial_schema::Migration),
             Box::new(m20260717_000002_mcp_token::Migration),
+            Box::new(m20260718_000003_claims::Migration),
         ]
     }
 }

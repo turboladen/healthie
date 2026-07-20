@@ -46,4 +46,7 @@ an argon2id hash and never logged.
 M1a complete: `healthie-shared` domain library (entities, migrations, services,
 briefing assembler). M1b complete: `healthie-mcp` — bearer-authed rmcp server
 (15 tools, `healthie://briefing` resource, `checkin` prompt) with a binary host
-until the M2 backend nests its `router()`. Next: `healthie-backend` + Svelte SPA.
+until the M2 backend nests its `router()`. M1c complete: claims-with-confidence
+registry + intake tools (`run_baseline_intake`, `record_intake_answers`,
+`update_claim`, `get_claims`) and the `baseline_intake` prompt — 19 tools total.
+Next: `healthie-backend` + Svelte SPA.

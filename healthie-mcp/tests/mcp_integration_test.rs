@@ -725,8 +725,330 @@ async fn checkin_prompt_renders_over_the_wire() {
     assert!(body.contains("get_briefing"), "{body}");
 }
 
-/// The 15 tools the M1b surface must advertise.
-const EXPECTED_TOOLS: [&str; 15] = [
+#[tokio::test]
+async fn baseline_intake_prompt_renders_over_the_wire() {
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
+    let body = post_rpc(
+        &app,
+        &token,
+        json!({
+            "jsonrpc": "2.0", "id": 6, "method": "prompts/get",
+            "params": { "name": "baseline_intake", "arguments": { "area": "screenings" } }
+        }),
+    )
+    .await;
+    assert!(body.contains("screenings"), "{body}");
+    assert!(body.contains("run_baseline_intake"), "{body}");
+}
+
+#[tokio::test]
+async fn intake_round_trip_record_coverage_update_resolve() {
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
+
+    // Empty registry: run_baseline_intake shows 11 categories, all zero.
+    let body = post_rpc(&app, &token, call_tool("run_baseline_intake", json!({}))).await;
+    let state = tool_payload(&body);
+    assert_eq!(state["coverage"].as_array().expect("coverage").len(), 11);
+    assert_eq!(state["total_claims"], 0);
+
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool(
+            "record_intake_answers",
+            json!({
+                "claims": [
+                    { "category": "family-history", "statement": "Father: afib onset in his 60s",
+                      "confidence": "recalled", "subject": "father", "topic": "afib",
+                      "source_quote": "I think my dad's afib started in his 60s?" },
+                    { "category": "screening", "statement": "Colonoscopy: unsure if ever",
+                      "confidence": "unknown", "topic": "colonoscopy",
+                      "source_quote": "I don't think I've ever had a colonoscopy" }
+                ]
+            }),
+        ),
+    )
+    .await;
+    let saved = tool_payload(&body);
+    assert_eq!(saved.as_array().expect("claims").len(), 2);
+    let unknown_id = saved[1]["id"].as_i64().expect("id");
+    let quote_before = saved[1]["source_quote"].clone();
+
+    // Coverage reflects the batch.
+    let body = post_rpc(&app, &token, call_tool("run_baseline_intake", json!({}))).await;
+    let state = tool_payload(&body);
+    assert_eq!(state["total_claims"], 2);
+    assert_eq!(state["total_unknowns"], 1);
+
+    // Resolve the unknown; source_quote survives revision (immutable evidence).
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool(
+            "update_claim",
+            json!({
+                "claim_id": unknown_id, "confidence": "not-done",
+                "statement": "Colonoscopy: confirmed never had one (checked records)"
+            }),
+        ),
+    )
+    .await;
+    let updated = tool_payload(&body);
+    assert_eq!(updated["confidence"], "not-done");
+    assert_eq!(
+        updated["source_quote"], quote_before,
+        "source_quote is immutable and must survive a revision unchanged"
+    );
+    assert!(
+        updated["source_quote"]
+            .as_str()
+            .expect("quote survives revision")
+            .contains("colonoscopy")
+    );
+
+    // get_claims filters: family subject.
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool("get_claims", json!({ "subject": "father" })),
+    )
+    .await;
+    let fam = tool_payload(&body);
+    assert_eq!(fam.as_array().expect("claims").len(), 1);
+    assert!(
+        fam[0]["source_quote"]
+            .as_str()
+            .expect("quote")
+            .contains("dad")
+    );
+
+    // get_claims subject "self" → self-only.
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool("get_claims", json!({ "subject": "self" })),
+    )
+    .await;
+    assert_eq!(tool_payload(&body).as_array().expect("claims").len(), 1);
+
+    // Briefing carries no unknowns now that it's resolved.
+    let body = post_rpc(&app, &token, call_tool("get_briefing", json!({}))).await;
+    assert_eq!(tool_payload(&body)["claims_needing_resolution"], json!([]));
+}
+
+#[tokio::test]
+async fn record_intake_answers_rejects_empty_batch_as_tool_error() {
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool("record_intake_answers", json!({ "claims": [] })),
+    )
+    .await;
+    let (is_error, _) = tool_result(&body);
+    assert!(is_error, "empty batch must surface as a tool-level error");
+
+    // An entirely absent `claims` key fails schema deserialization — kept
+    // that way ON PURPOSE so `claims` stays in the advertised `required`
+    // list (the schema is an LLM caller's primary coaching surface); the
+    // lenient-params error still names the field and points at the schema.
+    let body = post_rpc(&app, &token, call_tool("record_intake_answers", json!({}))).await;
+    let (is_error, text) = tool_result(&body);
+    assert!(
+        is_error,
+        "absent claims key must surface as a tool-level error"
+    );
+    assert!(
+        text.contains("claims") && text.contains("input schema"),
+        "absent key should get the schema-hint error naming the field, got: {text}"
+    );
+}
+
+/// The "self" sentinel must be honored on WRITE paths too: storing
+/// subject:"self" as NULL keeps the claim visible to the self filter, and
+/// `update_claim`'s subject:"self" reclassifies a misattributed claim.
+#[tokio::test]
+async fn subject_self_is_normalized_on_write_and_update() {
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
+
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool(
+            "record_intake_answers",
+            json!({
+                "claims": [
+                    { "category": "lifestyle", "statement": "Walks most mornings",
+                      "confidence": "recalled", "subject": "self" },
+                    { "category": "family-history", "statement": "Mother: hypertension",
+                      "confidence": "recalled", "subject": "mother" }
+                ]
+            }),
+        ),
+    )
+    .await;
+    let saved = tool_payload(&body);
+    assert!(
+        saved[0]["subject"].is_null(),
+        "subject 'self' must store as NULL"
+    );
+    let mother_id = saved[1]["id"].as_i64().expect("id");
+
+    // The self-scoped read must see the normalized claim.
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool("get_claims", json!({ "subject": "self" })),
+    )
+    .await;
+    let self_claims = tool_payload(&body);
+    assert_eq!(self_claims.as_array().expect("claims").len(), 1);
+    assert_eq!(self_claims[0]["statement"], "Walks most mornings");
+
+    // Reclassify the misattributed claim to Steve via subject "self".
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool(
+            "update_claim",
+            json!({
+                "claim_id": mother_id, "subject": "self"
+            }),
+        ),
+    )
+    .await;
+    assert!(
+        tool_payload(&body)["subject"].is_null(),
+        "'self' must clear subject to NULL"
+    );
+
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool("get_claims", json!({ "subject": "self" })),
+    )
+    .await;
+    assert_eq!(tool_payload(&body).as_array().expect("claims").len(), 2);
+}
+
+/// Case and blank edge cases of the sentinel: read and write share ONE
+/// predicate (trimmed, case-insensitive), blank on create means omitted,
+/// and blank on update is a loud error — never a silent clear.
+#[tokio::test]
+async fn subject_sentinel_handles_case_and_blank_variants() {
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
+
+    // Write "SELF" normalizes to NULL; a mixed-case READ ("Self") still
+    // resolves to the self scope.
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool(
+            "record_intake_answers",
+            json!({
+                "claims": [{ "category": "lifestyle", "statement": "Stretches nightly",
+                             "confidence": "recalled", "subject": "SELF" }]
+            }),
+        ),
+    )
+    .await;
+    assert!(
+        tool_payload(&body)[0]["subject"].is_null(),
+        "subject SELF must store as NULL"
+    );
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool("get_claims", json!({ "subject": "Self" })),
+    )
+    .await;
+    assert_eq!(
+        tool_payload(&body).as_array().expect("claims").len(),
+        1,
+        "mixed-case self read must resolve to the self scope"
+    );
+
+    // Blank subject on CREATE is treated as omitted (about Steve)…
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool(
+            "record_intake_answers",
+            json!({
+                "claims": [{ "category": "family-history", "statement": "Uncle: type 2 diabetes",
+                             "confidence": "recalled", "subject": "uncle" },
+                           { "category": "lifestyle", "statement": "Coffee: 2 cups most days",
+                             "confidence": "recalled", "subject": "  " }]
+            }),
+        ),
+    )
+    .await;
+    let saved = tool_payload(&body);
+    assert!(
+        saved[1]["subject"].is_null(),
+        "blank subject on create must store as NULL"
+    );
+    let uncle_id = saved[0]["id"].as_i64().expect("id");
+
+    // A padded relative name on update stores TRIMMED — the domain
+    // canonicalizes stored subjects so they stay reachable by their filter.
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool(
+            "update_claim",
+            json!({
+                "claim_id": uncle_id, "subject": " aunt "
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        tool_payload(&body)["subject"],
+        "aunt",
+        "stored subject must be trimmed"
+    );
+
+    // …but on UPDATE a blank subject is NOT a silent clear — the service
+    // rejects it loudly ("self" is the one documented clear affordance).
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool(
+            "update_claim",
+            json!({
+                "claim_id": uncle_id, "subject": " "
+            }),
+        ),
+    )
+    .await;
+    let (is_error, _) = tool_result(&body);
+    assert!(is_error, "blank subject on update must error, not clear");
+}
+
+#[tokio::test]
+async fn update_claim_not_found_is_tool_error() {
+    let (app, _db, token) = setup().await;
+    handshake(&app, &token).await;
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool(
+            "update_claim",
+            json!({ "claim_id": 9999, "confidence": "verified" }),
+        ),
+    )
+    .await;
+    assert_tool_error(&body, "not found");
+}
+
+/// The 19 tools the M1c surface must advertise (15 from M1b + 4 intake tools).
+const EXPECTED_TOOLS: [&str; 19] = [
     "get_briefing",
     "start_checkin",
     "record_checkin_response",
@@ -742,6 +1064,10 @@ const EXPECTED_TOOLS: [&str; 15] = [
     "record_protocol_outcome",
     "get_protocol_history",
     "update_profile",
+    "run_baseline_intake",
+    "record_intake_answers",
+    "update_claim",
+    "get_claims",
 ];
 
 #[tokio::test]
@@ -775,7 +1101,12 @@ async fn tools_list_advertises_all_tools_with_populated_schemas() {
     // guards the per-tool `input_schema = schema_for_type::<T>()` override
     // footgun, which is per-tool: a single missed override silently ships an
     // empty schema. The three no-arg tools correctly carry no properties.
-    let no_arg_tools = ["get_briefing", "start_checkin", "get_protocol_history"];
+    let no_arg_tools = [
+        "get_briefing",
+        "start_checkin",
+        "get_protocol_history",
+        "run_baseline_intake",
+    ];
     for tool in tools {
         let name = tool["name"].as_str().expect("tool name");
         if no_arg_tools.contains(&name) {
@@ -809,6 +1140,26 @@ async fn tools_list_advertises_all_tools_with_populated_schemas() {
         body.contains("musculoskeletal"),
         "ConcernTag vocab must appear in the advertised schema: {body}"
     );
+    // Same end-to-end guarantee for the claims vocabulary (kebab-case ClaimCategory).
+    assert!(
+        body.contains("family-history"),
+        "ClaimCategory vocab must appear in the advertised schema: {body}"
+    );
+
+    // update_claim must NOT expose source_quote — provenance is immutable at the
+    // MCP boundary, not just the domain layer (UpdateClaim has no such field).
+    let update_claim = tools
+        .iter()
+        .find(|t| t["name"] == "update_claim")
+        .expect("update_claim present");
+    let update_props = update_claim["inputSchema"]["properties"]
+        .as_object()
+        .expect("update_claim inputSchema.properties object");
+    assert!(
+        !update_props.contains_key("source_quote"),
+        "update_claim must not advertise source_quote (immutable evidence): {}",
+        update_claim["inputSchema"]
+    );
 
     // No-argument tools correctly advertise an empty (property-less) schema.
     let get_briefing = tools
@@ -839,6 +1190,8 @@ async fn instructions_teach_the_loop() {
         "record_plan_outcome",
         "commit_plan",
         "complete_checkin",
+        "run_baseline_intake",
+        "get_claims",
         "checkin",
     ] {
         assert!(body.contains(marker), "instructions must mention {marker}");

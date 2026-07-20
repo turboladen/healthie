@@ -47,7 +47,9 @@ it's an ADR.
 
 ## Index
 
-| ADR                                             | Status   | Decision                                                   |
-| ----------------------------------------------- | -------- | ---------------------------------------------------------- |
-| [0001](0001-record-architecture-decisions.md)   | Accepted | Adopt ADRs as the durable decision record                  |
-| [0002](0002-personal-domain-pattern-rebuild.md) | Accepted | Rebuild on the personal-domain pattern: checkin loop first |
+| ADR                                             | Status   | Decision                                                     |
+| ----------------------------------------------- | -------- | ------------------------------------------------------------ |
+| [0001](0001-record-architecture-decisions.md)   | Accepted | Adopt ADRs as the durable decision record                    |
+| [0002](0002-personal-domain-pattern-rebuild.md) | Accepted | Rebuild on the personal-domain pattern: checkin loop first   |
+| [0003](0003-typed-domain.md)                    | Accepted | Typed domain: chrono timestamps + SeaORM enums               |
+| [0004](0004-claims-registry.md)                 | Accepted | Claims-with-confidence registry: provenance, not transcripts |

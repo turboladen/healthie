@@ -150,5 +150,13 @@ mod tests {
             .all(&db)
             .await
             .unwrap();
+        crate::entities::claim::Entity::find()
+            .all(&db)
+            .await
+            .unwrap();
+        crate::entities::mcp_token::Entity::find()
+            .all(&db)
+            .await
+            .unwrap();
     }
 }

@@ -5,6 +5,7 @@
 //! The generated `prompt_router()` is `pub(crate)` so the `#[prompt_handler]`
 //! on `handler.rs`'s `ServerHandler` impl can reach it across modules.
 
+pub mod baseline_intake;
 pub mod checkin;
 
 use rmcp::{
@@ -14,7 +15,10 @@ use rmcp::{
     prompt, prompt_router,
 };
 
-use crate::{handler::HealthieMcp, schemas::CheckinPromptArgs};
+use crate::{
+    handler::HealthieMcp,
+    schemas::{BaselineIntakePromptArgs, CheckinPromptArgs},
+};
 
 #[prompt_router(vis = "pub(crate)")]
 impl HealthieMcp {
@@ -39,6 +43,43 @@ impl HealthieMcp {
                 .with_description("Accountable health-coach checkin"),
         )
     }
+
+    /// One sitting of the baseline intake; see [`baseline_intake::render`].
+    #[prompt(
+        name = "baseline_intake",
+        description = "Run one sitting of the baseline health-history intake: pick the biggest \
+                       coverage gaps (or steer with `area`), dig conversationally, and record \
+                       claims with honest confidence and verbatim quotes. Resumable by design — \
+                       the registry itself is the progress state."
+    )]
+    // `&self` is required by `#[prompt_router]` for registration; the body is a
+    // pure render over the args and never touches instance state.
+    #[allow(clippy::unused_self)]
+    async fn baseline_intake(
+        &self,
+        Parameters(args): Parameters<BaselineIntakePromptArgs>,
+    ) -> Result<GetPromptResult, McpError> {
+        let body = baseline_intake::render(args.area.as_deref());
+        Ok(
+            GetPromptResult::new(vec![PromptMessage::new_text(Role::User, body)])
+                .with_description("Baseline intake sitting"),
+        )
+    }
+}
+
+/// Shared test assertion: every token in `order` appears in `body`, in order,
+/// with the cursor advancing past each match — so REPEATED tokens are
+/// verified as separate occurrences (an absolute `find` cannot do that; see
+/// the `baseline_intake` test, whose order repeats `run_baseline_intake`).
+#[cfg(test)]
+pub(crate) fn assert_scripts_in_order(body: &str, order: &[&str]) {
+    let mut last = 0;
+    for (i, token) in order.iter().enumerate() {
+        let pos = body[last..].find(token).unwrap_or_else(|| {
+            panic!("body must mention {token} (occurrence index {i}) after byte {last}")
+        });
+        last += pos + token.len();
+    }
 }
 
 #[cfg(test)]
@@ -60,5 +101,22 @@ mod tests {
             .expect("checkin exposes arguments");
         let focus = args.iter().find(|a| a.name == "focus").expect("focus arg");
         assert_ne!(focus.required, Some(true), "focus must stay optional");
+    }
+
+    /// Catches the prompt silently dropping out of prompts/list or `area`
+    /// flipping to required.
+    #[test]
+    fn baseline_intake_is_registered_with_area_optional() {
+        let prompts = HealthieMcp::prompt_router().list_all();
+        let prompt = prompts
+            .iter()
+            .find(|p| p.name == "baseline_intake")
+            .expect("baseline_intake must be registered");
+        let args = prompt
+            .arguments
+            .as_ref()
+            .expect("baseline_intake exposes arguments");
+        let area = args.iter().find(|a| a.name == "area").expect("area arg");
+        assert_ne!(area.required, Some(true), "area must stay optional");
     }
 }

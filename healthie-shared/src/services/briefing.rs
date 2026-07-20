@@ -3,11 +3,11 @@ use sea_orm::ConnectionTrait;
 use serde::Serialize;
 
 use crate::{
-    entities::{checkin_response, goal, observation, profile, protocol},
+    entities::{checkin_response, claim, goal, observation, profile, protocol},
     error::DomainResult,
     services::{
-        checkin, concern, goal as goal_svc, observation as observation_svc, plan,
-        profile as profile_svc, protocol as protocol_svc,
+        checkin, claim as claim_svc, concern, goal as goal_svc, observation as observation_svc,
+        plan, profile as profile_svc, protocol as protocol_svc,
     },
 };
 
@@ -37,6 +37,9 @@ pub struct Briefing {
     pub active_protocols: Vec<ProtocolBrief>,
     pub observations_pending_review: Vec<observation::Model>,
     pub recent_observations: Vec<observation::Model>,
+    /// Claims with `unknown` confidence — tasks to resolve, surfaced as
+    /// available context, never a nag (ADR-0004).
+    pub claims_needing_resolution: Vec<claim::Model>,
 }
 
 /// Assembles the full daily briefing as of `today`.
@@ -92,6 +95,7 @@ pub async fn assemble(db: &impl ConnectionTrait, today: NaiveDate) -> DomainResu
         active_protocols,
         observations_pending_review: observation_svc::pending_review(db).await?,
         recent_observations: observation_svc::recent(db, since_window).await?,
+        claims_needing_resolution: claim_svc::unresolved(db).await?,
     })
 }
 
@@ -200,6 +204,51 @@ mod tests {
         assert!(b.previous_plan.is_some());
         assert!(b.last_checkin.is_some());
         assert!(b.days_since_last_checkin.is_some());
+    }
+
+    #[tokio::test]
+    async fn briefing_lists_unknown_claims_for_resolution() {
+        use crate::{
+            entities::claim::{ClaimCategory, ClaimConfidence},
+            inputs::claim::NewClaim,
+            services::claim,
+        };
+
+        let db = test_db().await;
+        claim::record_batch(
+            &db,
+            vec![
+                NewClaim {
+                    category: ClaimCategory::Screening,
+                    statement: "Last tetanus shot: no idea".to_owned(),
+                    confidence: ClaimConfidence::Unknown,
+                    subject: None,
+                    topic: Some("tetanus".to_owned()),
+                    occurred_on: None,
+                    source_quote: None,
+                    concern_id: None,
+                },
+                NewClaim {
+                    category: ClaimCategory::Surgery,
+                    statement: "Back surgery 2014, L4-L5 microdiscectomy".to_owned(),
+                    confidence: ClaimConfidence::Verified,
+                    subject: None,
+                    topic: Some("back-surgery".to_owned()),
+                    occurred_on: None,
+                    source_quote: None,
+                    concern_id: None,
+                },
+            ],
+        )
+        .await
+        .expect("seed claims");
+
+        let briefing = assemble(&db, date("2026-07-18")).await.expect("assemble");
+        assert_eq!(briefing.claims_needing_resolution.len(), 1);
+        assert_eq!(
+            briefing.claims_needing_resolution[0].confidence,
+            ClaimConfidence::Unknown
+        );
     }
 
     #[tokio::test]
