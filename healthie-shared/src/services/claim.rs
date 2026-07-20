@@ -13,7 +13,7 @@ use crate::{
     clock,
     entities::claim::{self, ClaimCategory, ClaimConfidence},
     error::{DomainError, DomainResult},
-    inputs::claim::{ClaimFilter, NewClaim, UpdateClaim},
+    inputs::claim::{ClaimFilter, NewClaim, UpdateClaim, is_self_sentinel},
     services::concern,
 };
 
@@ -33,16 +33,22 @@ pub struct CategoryCoverage {
 /// its callers; this domain guard defends the invariant against every OTHER
 /// write path (M2 backend, tests, future surfaces) — ADR-0004 §2.
 fn validate_subject(subject: Option<&str>) -> DomainResult<()> {
-    if let Some(subject) = subject {
-        let trimmed = subject.trim();
-        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("self") {
-            return Err(DomainError::invalid(
-                "subject",
-                "must be a relative's name, or omitted for claims about Steve",
-            ));
-        }
+    if let Some(subject) = subject
+        && (subject.trim().is_empty() || is_self_sentinel(subject))
+    {
+        return Err(DomainError::invalid(
+            "subject",
+            "must be a relative's name, or omitted for claims about Steve",
+        ));
     }
     Ok(())
+}
+
+/// Stored subjects are canonical: trimmed relative names. Without this, a
+/// padded value ("` father `") would pass validation yet be unreachable by
+/// the read filter, which compares against the trimmed name exactly.
+fn canonicalize_subject(subject: Option<String>) -> Option<String> {
+    subject.map(|s| s.trim().to_owned())
 }
 
 /// Record a batch of claims in one transaction.
@@ -79,7 +85,7 @@ pub async fn record_batch<C: ConnectionTrait + TransactionTrait>(
             category: Set(input.category),
             statement: Set(input.statement),
             confidence: Set(input.confidence),
-            subject: Set(input.subject),
+            subject: Set(canonicalize_subject(input.subject)),
             topic: Set(input.topic),
             occurred_on: Set(input.occurred_on),
             source_quote: Set(input.source_quote),
@@ -134,7 +140,7 @@ pub async fn update(
         active.confidence = Set(v);
     }
     if let Some(v) = input.subject {
-        active.subject = Set(v);
+        active.subject = Set(canonicalize_subject(v));
     }
     if let Some(v) = input.topic {
         active.topic = Set(v);
@@ -382,6 +388,50 @@ mod tests {
             record_batch(&db, vec![blank]).await.is_err(),
             "a blank subject must be rejected"
         );
+    }
+
+    /// Stored subjects are canonical (trimmed) on BOTH write paths — a padded
+    /// name would pass validation yet be unreachable by the trimmed read
+    /// filter.
+    #[tokio::test]
+    async fn stored_subjects_are_canonicalized_trimmed() {
+        let db = test_db().await;
+        let mut padded = father_afib();
+        padded.subject = Some("  father  ".to_owned());
+        let saved = record_batch(&db, vec![padded]).await.expect("record");
+        assert_eq!(
+            saved[0].subject.as_deref(),
+            Some("father"),
+            "create must store the trimmed name"
+        );
+
+        let updated = update(
+            &db,
+            saved[0].id,
+            UpdateClaim {
+                subject: Some(Some(" mother ".to_owned())),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("update");
+        assert_eq!(
+            updated.subject.as_deref(),
+            Some("mother"),
+            "update must store the trimmed name"
+        );
+
+        // And the trimmed name is reachable by its own subject filter.
+        let by_mother = list(
+            &db,
+            ClaimFilter {
+                subject: Some(Some("mother".to_owned())),
+                ..ClaimFilter::default()
+            },
+        )
+        .await
+        .expect("list");
+        assert_eq!(by_mother.len(), 1);
     }
 
     #[tokio::test]

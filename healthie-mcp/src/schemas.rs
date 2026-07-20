@@ -18,7 +18,7 @@ use healthie_shared::{
         protocol::{ProtocolKind, ProtocolVerdict},
     },
     inputs::{
-        claim::{ClaimFilter, NewClaim, UpdateClaim},
+        claim::{ClaimFilter, NewClaim, UpdateClaim, is_self_sentinel},
         concern::NewConcern,
         goal::NewGoal,
         observation::NewObservation,
@@ -337,26 +337,18 @@ pub struct RecordPlanOutcomeInput {
     pub note: Option<String>,
 }
 
-/// The literal "self" is a RESERVED word on the claim-subject contract:
-/// claims about Steve are STORED with subject = NULL. One predicate defines
-/// the sentinel (trimmed, ASCII case-insensitive) so the create, update, and
-/// read paths can never disagree on what counts as "self" — the services
-/// additionally reject the literal at the domain layer (ADR-0004 §2).
-fn is_self_sentinel(subject: &str) -> bool {
-    subject.trim().eq_ignore_ascii_case("self")
-}
-
-/// CREATE-path canonicalizer: "self" (any case) and blank both mean
-/// about-Steve → None; anything else is a relative name, stored trimmed.
-fn normalize_new_subject(subject: Option<String>) -> Option<String> {
-    subject.and_then(|s| {
-        let trimmed = s.trim();
-        if trimmed.is_empty() || is_self_sentinel(trimmed) {
-            None
-        } else {
-            Some(trimmed.to_owned())
-        }
-    })
+/// Canonical single-value subject mapping, shared by the create path and the
+/// read filter (the sentinel predicate itself lives in healthie-shared, so
+/// the MCP boundary and the domain guard can never disagree — ADR-0004 §2):
+/// "self" (any case) and blank both mean about-Steve → None; anything else
+/// is a relative name, trimmed.
+fn canonical_subject(subject: &str) -> Option<String> {
+    let trimmed = subject.trim();
+    if trimmed.is_empty() || is_self_sentinel(trimmed) {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
 }
 
 /// One claim as captured during intake. Statement is the distilled record;
@@ -390,7 +382,7 @@ impl ClaimInput {
             category: self.category,
             statement: self.statement,
             confidence: self.confidence,
-            subject: normalize_new_subject(self.subject),
+            subject: self.subject.and_then(|s| canonical_subject(&s)),
             topic: self.topic,
             occurred_on: self.occurred_on,
             source_quote: self.source_quote,
@@ -457,8 +449,8 @@ impl UpdateClaimInput {
 pub struct GetClaimsInput {
     pub category: Option<ClaimCategory>,
     pub confidence: Option<ClaimConfidence>,
-    /// "self" (any case) → only claims about Steve; any other value → that
-    /// relative (e.g. "father"); omit → all subjects.
+    /// "self" (any case) or blank → only claims about Steve; any other value
+    /// → that relative (e.g. "father"); omit → all subjects.
     pub subject: Option<String>,
 }
 
@@ -468,16 +460,9 @@ impl GetClaimsInput {
         ClaimFilter {
             category: self.category,
             confidence: self.confidence,
-            // Same sentinel predicate as the write paths — read and write
-            // can never disagree on what "self" means (blank ≡ self here).
-            subject: self.subject.map(|s| {
-                let trimmed = s.trim();
-                if trimmed.is_empty() || is_self_sentinel(trimmed) {
-                    None
-                } else {
-                    Some(trimmed.to_owned())
-                }
-            }),
+            // Same canonicalizer as the create path — read and write can
+            // never disagree on what a subject value means.
+            subject: self.subject.map(|s| canonical_subject(&s)),
         }
     }
 }

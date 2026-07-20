@@ -43,3 +43,13 @@ pub struct ClaimFilter {
     /// `Some(Some(s))` = that relative.
     pub subject: Option<Option<String>>,
 }
+
+/// The literal "self" (trimmed, ASCII case-insensitive) is a RESERVED word on
+/// the subject contract: claims about Steve store `subject` = NULL (ADR-0004
+/// §2). This is the single definition both the MCP boundary and the domain
+/// guard consume — the two layers can never disagree on what counts as
+/// "self".
+#[must_use]
+pub fn is_self_sentinel(subject: &str) -> bool {
+    subject.trim().eq_ignore_ascii_case("self")
+}

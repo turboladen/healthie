@@ -995,6 +995,25 @@ async fn subject_sentinel_handles_case_and_blank_variants() {
     );
     let uncle_id = saved[0]["id"].as_i64().expect("id");
 
+    // A padded relative name on update stores TRIMMED — the domain
+    // canonicalizes stored subjects so they stay reachable by their filter.
+    let body = post_rpc(
+        &app,
+        &token,
+        call_tool(
+            "update_claim",
+            json!({
+                "claim_id": uncle_id, "subject": " aunt "
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        tool_payload(&body)["subject"],
+        "aunt",
+        "stored subject must be trimmed"
+    );
+
     // …but on UPDATE a blank subject is NOT a silent clear — the service
     // rejects it loudly ("self" is the one documented clear affordance).
     let body = post_rpc(
