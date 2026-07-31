@@ -10,7 +10,9 @@
 
 use std::{fmt::Write as _, path::Path};
 
-use healthie_shared::services::apple_health::{ImportReport, SleepDayShift, SleepDayVerdict};
+use healthie_shared::services::apple_health::{
+    ImportReport, KindReport, SleepDayShift, SleepDayVerdict,
+};
 
 /// Format a finished import for stdout.
 #[must_use]
@@ -54,7 +56,58 @@ pub fn render(report: &ImportReport, path: &Path) -> String {
     render_kinds(&mut out, report);
     render_sum_sources(&mut out, report);
     render_sleep_shift(&mut out, report);
+    render_stale_rows(&mut out, report);
     out
+}
+
+/// Rows the run did not rewrite. Loud, because nothing else in the report
+/// distinguishes a stale row from a good one — the values look normal.
+fn render_stale_rows(out: &mut String, report: &ImportReport) {
+    if report.stale_rows.is_empty() {
+        return;
+    }
+    let total: usize = report.stale_rows.iter().map(|s| s.count).sum();
+    if report.stale_rows_deleted > 0 {
+        let _ = writeln!(
+            out,
+            "\n  replaced range       deleted {} pre-existing rows this run did not rewrite",
+            report.stale_rows_deleted
+        );
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "\n  ⚠  {total} PRE-EXISTING ROWS IN THE IMPORTED RANGE WERE NOT REWRITTEN"
+    );
+    // Line by line so rustfmt cannot rewrap it differently on successive runs.
+    for line in [
+        "     Either an earlier import placed them with a different sleep-day boundary or",
+        "     metric mapping — in which case they hold known-wrong values that upsert alone",
+        "     can never remove — OR they came from the live HAE push on days this export",
+        "     does not cover, in which case they are good data. Nothing records which.",
+        "     --replace-range DELETES them. Check some of the dates below before using it.",
+    ] {
+        let _ = writeln!(out, "{line}");
+    }
+    for stale in &report.stale_rows {
+        let dates: Vec<String> = stale
+            .sample_dates
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        let ellipsis = if stale.count > stale.sample_dates.len() {
+            ", …"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            out,
+            "       {:<24} {:>6}   e.g. {}{ellipsis}",
+            format!("{:?}", stale.kind),
+            stale.count,
+            dates.join(", ")
+        );
+    }
 }
 
 fn render_quarantine(out: &mut String, report: &ImportReport) {
@@ -118,8 +171,32 @@ fn render_kinds(out: &mut String, report: &ImportReport) {
                 o.days, o.mean_abs_diff, o.max_abs_diff, o.max_diff_date
             );
         }
+        if looks_like_a_fraction(k) {
+            let _ = write!(out, "   ⚠ LOOKS LIKE A 0-1 FRACTION, NOT A PERCENT");
+        }
         out.push('\n');
     }
+    if report.per_kind.iter().any(looks_like_a_fraction) {
+        // Written line by line: rustfmt rewraps a single long literal
+        // differently on successive runs, so fmt-check never settles.
+        for line in [
+            "     ⚠  HealthKit stores percentages as a 0-1 fraction, so a span entirely at or",
+            "        below 1.0 most likely needs a x100 conversion adding in units.rs. Verify",
+            "        against the Health app before trusting these rows (bead healthie-4u7).",
+        ] {
+            let _ = writeln!(out, "{line}");
+        }
+    }
+}
+
+/// Whether a percent-typed kind's observed span suggests Apple gave us a 0-1
+/// fraction rather than a 0-100 percentage.
+///
+/// Worth flagging rather than leaving to the eye: `GaitAsymmetry` legitimately
+/// runs 0-5 %, so `0.000 .. 0.050` and `0.000 .. 5.000` are easy to skim past,
+/// and only one of them is right.
+fn looks_like_a_fraction(kind: &KindReport) -> bool {
+    kind.unit == "%" && kind.days > 0 && kind.value_max <= 1.0
 }
 
 fn render_sum_sources(out: &mut String, report: &ImportReport) {
@@ -143,28 +220,37 @@ fn render_sum_sources(out: &mut String, report: &ImportReport) {
 }
 
 fn render_sleep_shift(out: &mut String, report: &ImportReport) {
-    let SleepDayShift::Compared {
-        compared_days,
-        prev_day,
-        same_day,
-        next_day,
-    } = report.sleep_day_shift
-    else {
-        let _ = writeln!(
-            out,
-            "\n  sleep day boundary   no existing sleep-total rows to compare against — NOT \
-             verified by this run"
-        );
-        return;
+    let (compared_days, prev_day, same_day, next_day) = match report.sleep_day_shift {
+        SleepDayShift::NoComparableRows => {
+            let _ = writeln!(
+                out,
+                "\n  sleep day boundary   no comparable sleep-total rows — NOT verified by this \
+                 run"
+            );
+            return;
+        }
+        SleepDayShift::SelfComparison { compared_days } => {
+            // Saying "agrees" here would retire the one question this import
+            // cannot otherwise answer, on the strength of reading itself back.
+            let _ = writeln!(
+                out,
+                "\n  sleep day boundary   compared against this import's OWN earlier output over \
+                 {compared_days} days — NOT independently verified.\n                       Only \
+                 the first import into a store holding live HAE rows can check this."
+            );
+            return;
+        }
+        SleepDayShift::Compared {
+            compared_days,
+            prev_day,
+            same_day,
+            next_day,
+        } => (compared_days, prev_day, same_day, next_day),
     };
-    let show = |v: Option<f64>| v.map_or_else(|| "     -".to_owned(), |d| format!("{d:>6.2}"));
     let _ = writeln!(
         out,
-        "\n  sleep day boundary   mean |Δ| vs existing rows over {compared_days} days:  D-1 {}   \
-         D {}   D+1 {}",
-        show(prev_day),
-        show(same_day),
-        show(next_day)
+        "\n  sleep day boundary   mean |Δ| vs existing rows over {compared_days} days:  D-1 \
+         {prev_day:>6.2}   D {same_day:>6.2}   D+1 {next_day:>6.2}"
     );
     match report.sleep_day_shift.verdict() {
         SleepDayVerdict::Agrees => {
@@ -200,8 +286,8 @@ mod tests {
     use healthie_shared::{
         entities::daily_metric::MetricKind,
         services::apple_health::{
-            ImportReport, KindReport, Overlap, QuarantinedName, SleepDayShift, SumSourceReport,
-            UnconvertibleUnit,
+            ImportReport, KindReport, Overlap, QuarantinedName, SleepDayShift, StaleRows,
+            SumSourceReport, UnconvertibleUnit,
         },
         test_support::date,
     };
@@ -223,6 +309,8 @@ mod tests {
             per_kind: Vec::new(),
             sum_sources: Vec::new(),
             sleep_day_shift: SleepDayShift::NoComparableRows,
+            stale_rows: Vec::new(),
+            stale_rows_deleted: 0,
         }
     }
 
@@ -247,9 +335,9 @@ mod tests {
         let mut report = base();
         report.sleep_day_shift = SleepDayShift::Compared {
             compared_days: 400,
-            prev_day: Some(0.11),
-            same_day: Some(4.82),
-            next_day: Some(5.03),
+            prev_day: 0.11,
+            same_day: 4.82,
+            next_day: 5.03,
         };
         let out = render(&report, Path::new("export.xml"));
         assert!(out.contains("MISMATCH"), "{out}");
@@ -262,9 +350,9 @@ mod tests {
         let mut report = base();
         report.sleep_day_shift = SleepDayShift::Compared {
             compared_days: 400,
-            prev_day: Some(4.9),
-            same_day: Some(0.08),
-            next_day: Some(5.1),
+            prev_day: 4.9,
+            same_day: 0.08,
+            next_day: 5.1,
         };
         let out = render(&report, Path::new("export.xml"));
         assert!(out.contains("the boundary agrees"), "{out}");
@@ -279,9 +367,9 @@ mod tests {
         let mut report = base();
         report.sleep_day_shift = SleepDayShift::Compared {
             compared_days: 400,
-            prev_day: Some(0.0),
-            same_day: Some(0.0),
-            next_day: Some(0.0),
+            prev_day: 0.0,
+            same_day: 0.0,
+            next_day: 0.0,
         };
         let out = render(&report, Path::new("export.xml"));
         assert!(!out.contains("MISMATCH"), "a tie is not a mismatch:\n{out}");
@@ -293,9 +381,9 @@ mod tests {
         let mut report = base();
         report.sleep_day_shift = SleepDayShift::Compared {
             compared_days: 400,
-            prev_day: Some(0.30),
-            same_day: Some(0.34),
-            next_day: Some(4.9),
+            prev_day: 0.30,
+            same_day: 0.34,
+            next_day: 4.9,
         };
         let out = render(&report, Path::new("export.xml"));
         assert!(!out.contains("MISMATCH"), "noise is not a mismatch:\n{out}");
@@ -325,6 +413,102 @@ mod tests {
         assert!(out.contains("0.910"), "{out}");
         assert!(out.contains("overwrote 3 days"), "{out}");
         assert!(out.contains("2026-07-28"), "{out}");
+    }
+
+    /// Reading your own output back is not verification, and the wording must
+    /// not let it read as any.
+    #[test]
+    fn self_comparison_is_reported_as_unverified_not_agreement() {
+        let mut report = base();
+        report.sleep_day_shift = SleepDayShift::SelfComparison {
+            compared_days: 4_000,
+        };
+        let out = render(&report, Path::new("export.xml"));
+        assert!(out.contains("OWN earlier output"), "{out}");
+        assert!(out.contains("NOT independently verified"), "{out}");
+        assert!(!out.contains("agrees"), "{out}");
+        assert!(!out.contains("MISMATCH"), "{out}");
+    }
+
+    /// Stale rows look entirely normal in the data, so the report is the only
+    /// place they can surface — and it has to name the remedy.
+    #[test]
+    fn stale_rows_are_loud_and_name_the_remedy() {
+        let mut report = base();
+        report.stale_rows = vec![StaleRows {
+            kind: MetricKind::SleepTotal,
+            count: 312,
+            sample_dates: vec![date("2019-04-02"), date("2019-06-11")],
+        }];
+        let out = render(&report, Path::new("export.xml"));
+        assert!(out.contains("NOT REWRITTEN"), "{out}");
+        assert!(out.contains("--replace-range"), "{out}");
+        assert!(out.contains("312"), "{out}");
+        assert!(out.contains("2019-04-02"), "{out}");
+    }
+
+    #[test]
+    fn deleted_stale_rows_are_reported_as_deleted() {
+        let mut report = base();
+        report.stale_rows = vec![StaleRows {
+            kind: MetricKind::SleepTotal,
+            count: 312,
+            sample_dates: vec![date("2019-04-02")],
+        }];
+        report.stale_rows_deleted = 312;
+        let out = render(&report, Path::new("export.xml"));
+        assert!(out.contains("deleted 312"), "{out}");
+        assert!(!out.contains("NOT REWRITTEN"), "already dealt with:\n{out}");
+    }
+
+    /// `HealthKit` stores percentages as a 0-1 fraction, so this is the
+    /// expected case rather than a remote one — and `GaitAsymmetry`'s real
+    /// 0-5 % range makes it easy to skim past unaided.
+    #[test]
+    fn fraction_scaled_percentages_are_flagged() {
+        let mut report = base();
+        report.per_kind = vec![
+            KindReport {
+                kind: MetricKind::Spo2,
+                unit: "%",
+                days: 900,
+                value_min: 0.91,
+                value_max: 0.99,
+                overlap: None,
+            },
+            KindReport {
+                kind: MetricKind::HeartRate,
+                unit: "count/min",
+                days: 900,
+                value_min: 0.5,
+                value_max: 0.9,
+                overlap: None,
+            },
+        ];
+        let out = render(&report, Path::new("export.xml"));
+        assert!(out.contains("LOOKS LIKE A 0-1 FRACTION"), "{out}");
+        assert!(out.contains("healthie-4u7"), "{out}");
+        // Only percent-typed kinds are candidates; a low count/min is just low.
+        assert_eq!(
+            out.matches("LOOKS LIKE A 0-1 FRACTION").count(),
+            1,
+            "only the %-unit kind should be flagged:\n{out}"
+        );
+    }
+
+    #[test]
+    fn percentages_already_in_0_100_are_not_flagged() {
+        let mut report = base();
+        report.per_kind = vec![KindReport {
+            kind: MetricKind::GaitAsymmetry,
+            unit: "%",
+            days: 900,
+            value_min: 0.0,
+            value_max: 5.0,
+            overlap: None,
+        }];
+        let out = render(&report, Path::new("export.xml"));
+        assert!(!out.contains("LOOKS LIKE A 0-1 FRACTION"), "{out}");
     }
 
     #[test]

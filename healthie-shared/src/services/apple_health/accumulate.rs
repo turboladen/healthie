@@ -357,6 +357,13 @@ struct SleepAcc {
     asleep: IntervalSet,
     source: Option<String>,
     last_ts: Option<DateTime<FixedOffset>>,
+    /// Source credited on the derived `SleepTotal` row, tracked separately
+    /// because it must come from a device that contributed *asleep* time.
+    /// `InBed` and `Awake` segments feed no sleep total, so crediting one of
+    /// their devices would name a source that contributed nothing to the value
+    /// — the same misattribution the Sum path goes to trouble to avoid.
+    asleep_source: Option<String>,
+    asleep_last_ts: Option<DateTime<FixedOffset>>,
 }
 
 /// One resolved `daily_metric` row, ready to persist.
@@ -450,6 +457,12 @@ impl Accumulator {
             night.source = source.map(str::to_owned);
         }
         if counts_as_asleep {
+            if night.asleep_last_ts.is_none_or(|prev| {
+                supersedes_source(start, source, prev, night.asleep_source.as_deref())
+            }) {
+                night.asleep_last_ts = Some(start);
+                night.asleep_source = source.map(str::to_owned);
+            }
             night.asleep.insert(interval);
             // Checked explicitly: undifferentiated legacy segments carry no
             // stage, so this union is the ONLY set they grow. Omitting it would
@@ -525,7 +538,7 @@ impl Accumulator {
                     MetricKind::SleepTotal,
                     *date,
                     night.asleep.hours(),
-                    night.source.clone(),
+                    night.asleep_source.clone(),
                 ));
             }
         }
@@ -1053,6 +1066,32 @@ mod tests {
             credited([None, Some("Watch")]).as_deref(),
             Some("Watch"),
             "an unattributed record must not erase a real device"
+        );
+    }
+
+    /// `SleepTotal` is built only from asleep-class segments, so its credited
+    /// source must come from one. An `InBed` device that contributed no sleep
+    /// time must not end up named on the total.
+    #[test]
+    fn sleep_total_is_credited_to_a_device_that_contributed_sleep() {
+        let mut acc = Accumulator::default();
+        // A bed sensor logs time in bed, later than the watch's sleep segment.
+        let (start, iv) = segment("2026-07-27 22:00:00 -0700", "2026-07-28 06:30:00 -0700");
+        acc.fold_sleep_segment(Some(MetricKind::TimeInBed), false, start, iv, Some("Bed"));
+        let (start, iv) = segment("2026-07-27 23:00:00 -0700", "2026-07-28 05:00:00 -0700");
+        acc.fold_sleep_segment(Some(MetricKind::SleepCore), true, start, iv, Some("Watch"));
+        let (start, iv) = segment("2026-07-28 06:00:00 -0700", "2026-07-28 06:20:00 -0700");
+        acc.fold_sleep_segment(Some(MetricKind::SleepAwake), false, start, iv, Some("Bed"));
+
+        let rows = acc.resolve().rows;
+        assert_eq!(
+            row_for(&rows, MetricKind::SleepTotal).source.as_deref(),
+            Some("Watch"),
+            "the bed sensor contributed no asleep time and must not be credited"
+        );
+        assert_eq!(
+            row_for(&rows, MetricKind::TimeInBed).source.as_deref(),
+            Some("Bed")
         );
     }
 

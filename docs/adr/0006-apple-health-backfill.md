@@ -183,6 +183,36 @@ Writes obey ADR-0005 §5 — `(kind, date)` upsert, last-write-wins — so a bac
 overwrites rows a live HAE push already landed. That is the stated contract and
 this path keeps it, with no date-fencing flag.
 
+**Re-running is idempotent for value changes, not for key changes**, and the
+distinction matters more than it first appears. A corrected unit or aggregation
+rewrites the same `(kind, date)` rows, so the old figures are fully replaced. A
+corrected **sleep-day boundary** — precisely the fix the day-shift check
+prescribes — moves nights onto different dates, and a re-mapped metric name moves
+rows to a different kind. Upsert never deletes, so at the trailing edge of every
+contiguous run of recorded nights the old row is never rewritten and survives
+holding a known-wrong value on a day that now belongs to a different night or to
+none. Over a decade with realistic gaps (pre-Watch years, dead batteries,
+travel) that is hundreds of orphans per sleep kind, all with entirely normal
+values and a high `rows_overwritten` count to hide behind.
+
+So after writing, the import queries each kind it produced across **that kind's
+own** date range, subtracts what it wrote, and reports the remainder as stale —
+and `--replace-range` deletes them. Reporting without a remedy would be the same
+trap as a false alarm: a warning nobody can act on. Deleting is opt-in because
+deleting real data is the operator's decision, not a silent consequence of
+re-running an import.
+
+The scoping is per kind, not one range shared across the import, because kinds
+cover wildly different spans: a decade of heart rate beside two weigh-ins would
+stretch the weight window across the whole decade and sweep in every weigh-in
+the live push landed in between.
+
+Even per kind this is a **heuristic, and the report says so**. `daily_metric`
+records no provenance (healthie-1ru), so a row this import did not write is
+equally consistent with an earlier import misplacing it and with the live HAE
+push covering a day this export does not. The warning names both readings rather
+than asserting the first, because the remedy it offers is deletion.
+
 But those overlapping rows are the **only** cross-check the two intakes ever
 get, and overwriting destroys them. So before writing, the import reports per
 kind how many rows it is about to replace and how far its reconstruction
@@ -195,10 +225,25 @@ reconstructed night is compared against existing rows one day either side; if a
 neighbour fits decisively better, the run says so and names the constant to
 change. It is deliberately conservative — ties resolve to same-day, and a
 neighbour must win both proportionally and absolutely — because the warning tells
-the operator to re-import a decade of history. Where there is nothing to compare
-against (a fresh database, or an old export landing beside newer history) it
-reports "not verified by this run" rather than a table of zeros that would read
-as agreement.
+the operator to re-import a decade of history.
+
+**The check is only meaningful on the first import into a store holding live HAE
+rows, and it says so rather than pretending otherwise.** Writes are
+last-write-wins, so from the second run onward the rows it would compare against
+are its _own previous output_. That is not merely uninformative, it inverts:
+after a correct boundary fix, run 2 finds its nights bit-identical to run 1's
+rows one day over and reports a mismatch in the opposite direction, so the
+fix-and-re-run loop the report prescribes would oscillate forever with each run
+confidently contradicting the last. Self-comparison is therefore detected — a
+preponderance of _exactly zero_ differences, which two independent computations
+of a night never produce — and reported as "not independently verified", never as
+agreement. A false green light here would be worse than no check at all, because
+it retires the one question this importer cannot otherwise answer.
+
+The three means also share one denominator (only nights with a stored row at
+`D−1`, `D` and `D+1` are counted). Means taken over different day sets are not
+comparable to each other: a single sparse stored row would otherwise yield a
+confident verdict conjured out of nothing.
 
 ### 8. Streaming parse, and where the memory actually goes
 
@@ -220,10 +265,14 @@ Retention, stated honestly:
   consume memory.
 
 Because readings collapse _before_ any database write, the write volume is
-per `(kind, date)` — roughly 100k rows for a decade, single-digit seconds in one
-transaction. Bulk `ON CONFLICT` upsert (healthie-zp8) is therefore **not** needed
-here, and reusing `ingest_hae`'s row-at-a-time helper keeps exactly one
-last-write-wins implementation in the codebase.
+per `(kind, date)` — roughly 100k rows for a decade, rather than one write per
+reading. That is two statements per row inside a single write transaction. **No
+runtime is claimed**: this has not been measured against a real export, and the
+transaction is held open across all of them. Bulk `ON CONFLICT` upsert
+(healthie-zp8) is therefore not needed on _volume_ grounds, and reusing
+`ingest_hae`'s row-at-a-time helper keeps exactly one last-write-wins
+implementation in the codebase — but if the write phase proves slow on the
+odroid, healthie-zp8 is the fix.
 
 ### 9. `quick-xml`, and layering
 

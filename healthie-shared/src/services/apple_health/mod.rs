@@ -30,7 +30,13 @@
 //! - **Writes are last-write-wins on `(kind, date)`**, so a backfill overwrites
 //!   rows a live HAE push already landed. The report compares against those
 //!   rows *before* overwriting them, because that comparison is the only
-//!   available check on whether the two paths agree.
+//!   available check on whether the two paths agree — and only on the first
+//!   run, since afterwards those rows are this importer's own output.
+//! - **Re-running is idempotent for value changes, not for key changes.** A
+//!   corrected unit or aggregation rewrites the same `(kind, date)` rows. A
+//!   corrected *sleep-day boundary* or metric mapping moves rows to different
+//!   dates or kinds, and nothing deletes what sat at the old ones — see
+//!   [`ImportReport::stale_rows`] and [`ImportOptions::replace_range`].
 
 pub(crate) mod accumulate;
 pub(crate) mod mapping;
@@ -38,7 +44,7 @@ pub(crate) mod parse;
 pub(crate) mod units;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs::File,
     io::{BufRead, BufReader},
     path::Path,
@@ -133,25 +139,43 @@ pub struct SumSourceReport {
 ///
 /// A day-shifted sleep row is invisible to every other check — its value span
 /// looks perfectly normal — so this compares each reconstructed `SleepTotal`
-/// against existing rows one day either side. It can only say anything where
-/// stored rows and imported nights overlap; otherwise it reports
-/// [`Self::NoComparableRows`] rather than a table of zeros that would read as
-/// agreement.
+/// against existing rows one day either side.
+///
+/// # It only means something on the first run
+///
+/// Writes are last-write-wins, so once an import has run, the stored rows it
+/// would compare against **are its own previous output**. Comparing against
+/// yourself proves nothing, and worse, it actively misleads: after a correct
+/// boundary fix, run 2 finds its nights bit-identical to run 1's rows one day
+/// over and reports a mismatch in the opposite direction, so the fix-and-re-run
+/// loop oscillates forever while each run argues confidently against the last.
+///
+/// Self-comparison is therefore detected and reported as such
+/// ([`Self::SelfComparison`]), never as agreement. A false green light here
+/// would be worse than no check at all, because it retires the one question
+/// this importer cannot otherwise answer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SleepDayShift {
     /// Nothing to compare against: either no `SleepTotal` rows are stored at
-    /// all, or none fall within a day of anything this import produced (an old
-    /// export landing beside newer history). Both mean the boundary was simply
-    /// not checked by this run.
+    /// all, or none sit in a full three-day window around an imported night.
     NoComparableRows,
+    /// The stored rows are (mostly) this importer's own earlier output, so the
+    /// boundary was not independently checked.
+    SelfComparison { compared_days: usize },
+    /// A genuine comparison against rows this import did not write.
+    ///
+    /// All three means share one denominator — only days with a stored row at
+    /// `D−1`, `D` *and* `D+1` are counted — because comparing means taken over
+    /// different day sets is how a single sparse row produces a confident
+    /// verdict out of nothing.
     Compared {
         compared_days: usize,
         /// Mean |ours(D) − existing(D−1)|.
-        prev_day: Option<f64>,
+        prev_day: f64,
         /// Mean |ours(D) − existing(D)|.
-        same_day: Option<f64>,
+        same_day: f64,
         /// Mean |ours(D) − existing(D+1)|.
-        next_day: Option<f64>,
+        next_day: f64,
     },
 }
 
@@ -175,11 +199,21 @@ pub enum SleepDayVerdict {
     Mismatch { offset: i8 },
 }
 
+/// Index of the smallest mean, preferring same-day on a tie: equal fits carry
+/// no evidence of a shift, and the same day is the null hypothesis.
+fn best_index(means: [f64; 3]) -> usize {
+    // Same-day first so `min_by`, which keeps the first minimum, wins ties.
+    [1usize, 0, 2]
+        .into_iter()
+        .min_by(|a, b| means[*a].total_cmp(&means[*b]))
+        .unwrap_or(1)
+}
+
+/// Day offset each mean in the `[prev, same, next]` triple was measured at.
+const OFFSET_FOR_INDEX: [i8; 3] = [-1, 0, 1];
+
 impl SleepDayShift {
-    /// The offset that fits best, or `None` when there is nothing to compare.
-    ///
-    /// Ties resolve to `0`: equal fits carry no evidence of a shift, and the
-    /// same day is the null hypothesis.
+    /// The offset that fits best, or `None` when no real comparison happened.
     #[must_use]
     pub fn best_offset(&self) -> Option<i8> {
         let Self::Compared {
@@ -187,17 +221,11 @@ impl SleepDayShift {
             same_day,
             next_day,
             ..
-        } = self
+        } = *self
         else {
             return None;
         };
-        // Offset 0 is listed first so `min_by`, which keeps the first minimum,
-        // returns it whenever the fits are equal.
-        [(0i8, same_day), (-1, prev_day), (1, next_day)]
-            .into_iter()
-            .filter_map(|(offset, diff)| diff.map(|d| (offset, d)))
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(offset, _)| offset)
+        Some(OFFSET_FOR_INDEX[best_index([prev_day, same_day, next_day])])
     }
 
     /// Whether the sleep-day boundary agrees with the rows already stored.
@@ -205,7 +233,7 @@ impl SleepDayShift {
     /// Deliberately conservative. This warning tells the operator to change a
     /// constant and re-import a decade of history, so it fires only when a
     /// neighbouring day fits both proportionally and absolutely better — never
-    /// on a tie, and never on noise.
+    /// on a tie, never on noise, and never against this import's own output.
     #[must_use]
     pub fn verdict(&self) -> SleepDayVerdict {
         let Self::Compared {
@@ -213,30 +241,62 @@ impl SleepDayShift {
             same_day,
             next_day,
             ..
-        } = self
+        } = *self
         else {
             return SleepDayVerdict::Unverified;
         };
-        let Some(offset) = self.best_offset() else {
-            return SleepDayVerdict::Unverified;
-        };
-        if offset == 0 {
+        let means = [prev_day, same_day, next_day];
+        let best = best_index(means);
+        if best == 1 {
             return SleepDayVerdict::Agrees;
         }
-        // A neighbour won, but only counts if same-day is measurably worse.
-        let (Some(same), Some(best)) = (*same_day, if offset < 0 { *prev_day } else { *next_day })
-        else {
-            // No same-day rows at all to compare against, so the neighbour
-            // "winning" is an artefact of missing data, not evidence.
-            return SleepDayVerdict::Agrees;
-        };
-        if best < same * MATERIAL_SHIFT_RATIO && (same - best) >= MATERIAL_SHIFT_HOURS {
-            SleepDayVerdict::Mismatch { offset }
+        if means[best] < same_day * MATERIAL_SHIFT_RATIO
+            && (same_day - means[best]) >= MATERIAL_SHIFT_HOURS
+        {
+            SleepDayVerdict::Mismatch {
+                offset: OFFSET_FOR_INDEX[best],
+            }
         } else {
             SleepDayVerdict::Agrees
         }
     }
 }
+
+/// Rows already in the store, of a kind this run produced and inside that
+/// kind's imported date range, that this run did **not** rewrite.
+///
+/// Upsert never deletes, so a re-run whose fix changes a row's *key* rather
+/// than its *value* — a sleep-day boundary change, or re-mapping a name to a
+/// different [`MetricKind`] — leaves the old rows behind holding known-wrong
+/// values on days that now belong to a different night, or to none. Values look
+/// entirely normal and `rows_overwritten` stays high, so nothing else in the
+/// report would hint at them.
+///
+/// **Not proof of that, though.** `daily_metric` records no provenance
+/// (healthie-1ru), so a row here is equally consistent with a day the live HAE
+/// push covered and this export simply does not. Deleting is therefore opt-in
+/// and the report names both possibilities.
+#[derive(Debug, Clone)]
+pub struct StaleRows {
+    pub kind: MetricKind,
+    pub count: usize,
+    /// A few examples, for going and looking.
+    pub sample_dates: Vec<NaiveDate>,
+}
+
+/// How an import should treat rows it did not rewrite.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ImportOptions {
+    /// Delete pre-existing rows inside the imported range that this run did not
+    /// produce, instead of only reporting them.
+    ///
+    /// Off by default: deleting real data is the operator's decision, not a
+    /// silent consequence of re-running an import.
+    pub replace_range: bool,
+}
+
+/// Number of stale dates listed per kind before the report stops enumerating.
+const STALE_SAMPLE_LIMIT: usize = 5;
 
 /// Everything one import did, for the operator to read.
 #[derive(Debug, Clone)]
@@ -254,6 +314,11 @@ pub struct ImportReport {
     pub per_kind: Vec<KindReport>,
     pub sum_sources: Vec<SumSourceReport>,
     pub sleep_day_shift: SleepDayShift,
+    /// Rows this run did not rewrite — see [`StaleRows`].
+    pub stale_rows: Vec<StaleRows>,
+    /// How many of those were deleted (non-zero only with
+    /// [`ImportOptions::replace_range`]).
+    pub stale_rows_deleted: usize,
 }
 
 /// Parse an `export.xml` from disk. Synchronous and database-free.
@@ -283,14 +348,25 @@ pub fn parse_export_reader<R: BufRead>(reader: R) -> DomainResult<ParsedExport> 
 /// Persist a parsed export: curated rows into `daily_metric`, uncurated names
 /// into `quarantined_metric`, all in one transaction.
 ///
-/// Idempotent — `(kind, date)` upserts last-write-wins, so re-running after
-/// fixing a mapping re-lands cleanly instead of duplicating.
+/// # What re-running does and does not guarantee
+///
+/// `(kind, date)` upserts last-write-wins, so a re-run whose fix changes a
+/// row's **value** — a unit-scale correction, an aggregation change — fully
+/// replaces the old figure. That case is idempotent.
+///
+/// A re-run whose fix changes a row's **key** is not. Shifting the sleep-day
+/// boundary, or re-mapping a name onto a different [`MetricKind`], moves
+/// nights onto different dates; nothing deletes what was written at the old
+/// ones, so rows survive holding known-wrong values. Those are reported as
+/// [`ImportReport::stale_rows`], and [`ImportOptions::replace_range`] deletes
+/// them.
 ///
 /// # Errors
 /// Returns [`DomainError::Db`] on database failure.
 pub async fn persist_import<C: ConnectionTrait + TransactionTrait>(
     db: &C,
     parsed: ParsedExport,
+    options: ImportOptions,
 ) -> DomainResult<ImportReport> {
     let ParsedExport { accumulator, stats } = parsed;
     let resolved = accumulator.resolve();
@@ -332,22 +408,20 @@ pub async fn persist_import<C: ConnectionTrait + TransactionTrait>(
         max_date = Some(max_date.map_or(row.date, |d: NaiveDate| d.max(row.date)));
     }
 
-    for (raw_name, sample) in &stats.quarantined {
-        let mut point = sample.point.clone();
-        if let Some(meta) = point
-            .get_mut("_import")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            meta.insert("records_seen".to_owned(), sample.records_seen.into());
-        }
-        // `upsert_quarantine` keys on `(raw_name, date)`, and the retained date
-        // is whichever record this run happened to see first. Importing a
-        // second export that reaches further back would otherwise land a
-        // *second* row for the same name, quietly breaking the one-row-per-name
-        // invariant this path promises. Drop the other dates first.
-        drop_other_dates(&txn, raw_name, sample.date).await?;
-        upsert_quarantine(&txn, raw_name, sample.date, &point, now).await?;
-    }
+    persist_quarantine(&txn, &stats, now).await?;
+
+    // Rows inside the imported range that this run did NOT write. On a first
+    // import there are none; after a key-changing fix they are the old, wrong
+    // placements that upsert alone can never reach.
+    let stale = match min_date.zip(max_date) {
+        Some(range) => find_stale_rows(&txn, &resolved.rows, range).await?,
+        None => Vec::new(),
+    };
+    let stale_rows_deleted = if options.replace_range && !stale.is_empty() {
+        delete_stale_rows(&txn, &stale).await?
+    } else {
+        0
+    };
 
     txn.commit().await?;
 
@@ -400,7 +474,114 @@ pub async fn persist_import<C: ConnectionTrait + TransactionTrait>(
             })
             .collect(),
         sleep_day_shift,
+        stale_rows: summarize_stale(&stale),
+        stale_rows_deleted,
     })
+}
+
+/// Write one quarantine row per uncurated name seen this run.
+async fn persist_quarantine<C: ConnectionTrait>(
+    db: &C,
+    stats: &ImportStats,
+    now: chrono::DateTime<chrono::Utc>,
+) -> DomainResult<()> {
+    for (raw_name, sample) in &stats.quarantined {
+        let mut point = sample.point.clone();
+        if let Some(meta) = point
+            .get_mut("_import")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            meta.insert("records_seen".to_owned(), sample.records_seen.into());
+        }
+        // `upsert_quarantine` keys on `(raw_name, date)`, and the retained date
+        // is whichever record this run happened to see first. Importing a
+        // second export that reaches further back would otherwise land a
+        // *second* row for the same name, quietly breaking the one-row-per-name
+        // invariant this path promises. Drop the other dates first.
+        drop_other_dates(db, raw_name, sample.date).await?;
+        upsert_quarantine(db, raw_name, sample.date, &point, now).await?;
+    }
+    Ok(())
+}
+
+/// Rows this run did not write, of a kind it produced and inside **that kind's
+/// own** date range.
+///
+/// Scoped per kind rather than over one range shared by every kind, because the
+/// ranges differ wildly: a decade of `HeartRate` alongside two `Weight`
+/// readings would otherwise stretch the weight window across the whole decade
+/// and sweep in every weigh-in the live push landed in between.
+///
+/// Even per-kind this cannot be exact — `daily_metric` has no column recording
+/// which intake wrote a row (healthie-1ru), so a gap this export does not cover
+/// is indistinguishable from a row an earlier import misplaced. The caller
+/// reports both possibilities rather than asserting one.
+async fn find_stale_rows<C: ConnectionTrait>(
+    db: &C,
+    produced: &[PendingRow],
+    (from, to): (NaiveDate, NaiveDate),
+) -> DomainResult<Vec<(MetricKind, NaiveDate, i32)>> {
+    let mut ranges: BTreeMap<MetricKind, (NaiveDate, NaiveDate)> = BTreeMap::new();
+    for row in produced {
+        ranges
+            .entry(row.kind)
+            .and_modify(|(lo, hi)| {
+                *lo = (*lo).min(row.date);
+                *hi = (*hi).max(row.date);
+            })
+            .or_insert((row.date, row.date));
+    }
+    let kinds: BTreeSet<MetricKind> = ranges.keys().copied().collect();
+    let written: HashSet<(MetricKind, NaiveDate)> =
+        produced.iter().map(|r| (r.kind, r.date)).collect();
+
+    Ok(daily_metric::Entity::find()
+        // The global range only narrows what the database returns; each row is
+        // then held to its own kind's range below.
+        .filter(daily_metric::Column::Kind.is_in(kinds))
+        .filter(daily_metric::Column::Date.between(from, to))
+        .all(db)
+        .await?
+        .into_iter()
+        .filter(|row| {
+            ranges
+                .get(&row.kind)
+                .is_some_and(|(lo, hi)| row.date >= *lo && row.date <= *hi)
+                && !written.contains(&(row.kind, row.date))
+        })
+        .map(|row| (row.kind, row.date, row.id))
+        .collect())
+}
+
+async fn delete_stale_rows<C: ConnectionTrait>(
+    db: &C,
+    stale: &[(MetricKind, NaiveDate, i32)],
+) -> DomainResult<usize> {
+    let ids: Vec<i32> = stale.iter().map(|(_, _, id)| *id).collect();
+    let deleted = ids.len();
+    daily_metric::Entity::delete_many()
+        .filter(daily_metric::Column::Id.is_in(ids))
+        .exec(db)
+        .await?;
+    Ok(deleted)
+}
+
+fn summarize_stale(stale: &[(MetricKind, NaiveDate, i32)]) -> Vec<StaleRows> {
+    let mut by_kind: BTreeMap<MetricKind, Vec<NaiveDate>> = BTreeMap::new();
+    for (kind, date, _) in stale {
+        by_kind.entry(*kind).or_default().push(*date);
+    }
+    by_kind
+        .into_iter()
+        .map(|(kind, mut dates)| {
+            dates.sort_unstable();
+            StaleRows {
+                kind,
+                count: dates.len(),
+                sample_dates: dates.into_iter().take(STALE_SAMPLE_LIMIT).collect(),
+            }
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -465,6 +646,10 @@ async fn clear_promoted_quarantine<C: ConnectionTrait>(db: &C) -> DomainResult<u
         .all(db)
         .await?
         .into_iter()
+        // Load-bearing, NOT a redundant re-check of the SQL filter above:
+        // SQLite's LIKE is ASCII-case-insensitive, so `starts_with(HK_PREFIX)`
+        // also matches `hk…`. ADR-0006 §6's claim that this scope can never
+        // reach an HAE row rests on these exact-match Rust predicates.
         .filter(|row| {
             let name_now_handled =
                 is_recognized_hk_name(&row.raw_name) || map_sleep_stage(&row.raw_name).is_some();
@@ -513,44 +698,73 @@ fn quarantined_for_its_name(raw_point: &serde_json::Value) -> bool {
         .is_none_or(|reason| NAME_BASED_QUARANTINE_REASONS.contains(&reason))
 }
 
+/// Fraction of a comparison that may land on bit-identical values before we
+/// conclude we are reading our own output.
+///
+/// Two independent computations of a night — Apple's own rollup versus an
+/// interval union reconstructed from raw segments — essentially never agree to
+/// the last bit, and never do so across hundreds of days. A preponderance of
+/// exact matches is not agreement; it is a mirror.
+const SELF_COMPARISON_FRACTION: f64 = 0.5;
+
 /// Mean absolute difference between reconstructed `SleepTotal` values and
 /// existing rows at day offsets −1, 0 and +1.
+///
+/// Only days with a stored row at all three offsets are counted, so the three
+/// means share a denominator. Means taken over different day sets are not
+/// comparable to each other: one stored row beside imported nights of 8/2/8
+/// hours would otherwise yield `prev = 0.0` against `same = 6.0` and a
+/// confident verdict conjured out of a single row.
 fn sleep_day_shift(rows: &[PendingRow], existing: &BTreeMap<NaiveDate, f64>) -> SleepDayShift {
     if existing.is_empty() {
         return SleepDayShift::NoComparableRows;
     }
-    let mut sums = [(0.0f64, 0usize); 3];
+    let mut sums = [0.0f64; 3];
+    let mut exact_matches = [0usize; 3];
     let mut compared_days = 0usize;
+
     for row in rows.iter().filter(|r| r.kind == MetricKind::SleepTotal) {
-        let mut matched = false;
-        for (slot, offset) in [(0usize, -1i64), (1, 0), (2, 1)] {
-            let Some(date) = row.date.checked_add_signed(chrono::Duration::days(offset)) else {
-                continue;
-            };
-            if let Some(prior) = existing.get(&date) {
-                sums[slot].0 += (row.value - prior).abs();
-                sums[slot].1 += 1;
-                matched = true;
+        let (Some(prev), Some(next)) = (row.date.pred_opt(), row.date.succ_opt()) else {
+            continue;
+        };
+        let (Some(before), Some(on), Some(after)) = (
+            existing.get(&prev),
+            existing.get(&row.date),
+            existing.get(&next),
+        ) else {
+            continue;
+        };
+        for (slot, stored) in [(0usize, before), (1, on), (2, after)] {
+            let diff = (row.value - stored).abs();
+            sums[slot] += diff;
+            if diff == 0.0 {
+                exact_matches[slot] += 1;
             }
         }
-        if matched {
-            compared_days += 1;
-        }
+        compared_days += 1;
     }
+
     if compared_days == 0 {
         return SleepDayShift::NoComparableRows;
     }
-    let mean = |(total, count): (f64, usize)| {
-        // A day tally; f64 is exact well past this.
-        #[allow(clippy::cast_precision_loss)]
-        let n = count as f64;
-        (count > 0).then(|| total / n)
-    };
+    // A day tally; f64 is exact well past this.
+    #[allow(clippy::cast_precision_loss)]
+    let n = compared_days as f64;
+    let means = [sums[0] / n, sums[1] / n, sums[2] / n];
+
+    // If the offset that "fits best" fits because it is reading rows this
+    // importer wrote on an earlier run, there is nothing here to learn.
+    #[allow(clippy::cast_precision_loss)]
+    let exact_at_best = exact_matches[best_index(means)] as f64;
+    if exact_at_best > n * SELF_COMPARISON_FRACTION {
+        return SleepDayShift::SelfComparison { compared_days };
+    }
+
     SleepDayShift::Compared {
         compared_days,
-        prev_day: mean(sums[0]),
-        same_day: mean(sums[1]),
-        next_day: mean(sums[2]),
+        prev_day: means[0],
+        same_day: means[1],
+        next_day: means[2],
     }
 }
 
@@ -559,7 +773,8 @@ mod tests {
     use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, EntityTrait};
 
     use super::{
-        ImportReport, SleepDayShift, SleepDayVerdict, parse_export_reader, persist_import,
+        ImportOptions, ImportReport, SleepDayShift, SleepDayVerdict, parse_export_reader,
+        persist_import,
     };
     use crate::{
         entities::{daily_metric, daily_metric::MetricKind, quarantined_metric},
@@ -590,7 +805,25 @@ mod tests {
         xml: &str,
     ) -> ImportReport {
         let parsed = parse_export_reader(xml.as_bytes()).expect("parse");
-        persist_import(db, parsed).await.expect("persist")
+        persist_import(db, parsed, ImportOptions::default())
+            .await
+            .expect("persist")
+    }
+
+    async fn import_replacing<C: ConnectionTrait + sea_orm::TransactionTrait>(
+        db: &C,
+        xml: &str,
+    ) -> ImportReport {
+        let parsed = parse_export_reader(xml.as_bytes()).expect("parse");
+        persist_import(
+            db,
+            parsed,
+            ImportOptions {
+                replace_range: true,
+            },
+        )
+        .await
+        .expect("persist")
     }
 
     fn close(a: f64, b: f64) -> bool {
@@ -676,6 +909,95 @@ mod tests {
         assert_eq!(rows.len(), 4, "re-running must upsert, not duplicate");
         let quarantined = quarantined_metric::Entity::find().all(&db).await.unwrap();
         assert_eq!(quarantined.len(), 1);
+
+        // Counts alone would pass with a non-deterministic winner silently
+        // rewriting values on every run; assert the values themselves.
+        let mut actual: Vec<(MetricKind, f64, Option<f64>, Option<f64>)> = rows
+            .iter()
+            .map(|r| (r.kind, r.value, r.min, r.max))
+            .collect();
+        actual.sort_by_key(|a| a.0);
+        let weight = 220.462_262_184_877_6;
+        let expected = [
+            // Weight is AvgMinMax, so a lone reading is its own spread.
+            (MetricKind::Weight, weight, Some(weight), Some(weight)),
+            (MetricKind::HeartRate, 70.0, Some(50.0), Some(90.0)),
+            (MetricKind::SleepTotal, 6.0, None, None),
+            (MetricKind::SleepCore, 6.0, None, None),
+        ];
+        let mut expected = expected.to_vec();
+        expected.sort_by_key(|a| a.0);
+        for ((kind, value, min, max), (ek, ev, emin, emax)) in actual.iter().zip(&expected) {
+            assert_eq!(kind, ek);
+            assert!(close(*value, *ev), "{kind:?}: {value} != {ev}");
+            assert_eq!((*min, *max), (*emin, *emax), "{kind:?} spread");
+        }
+    }
+
+    /// A re-run whose fix changes a row's KEY rather than its value cannot be
+    /// idempotent: nothing deletes what sat at the old key. A boundary change
+    /// is exactly that case, and the stale rows hold plausible-looking values
+    /// on days that now belong to a different night.
+    #[tokio::test]
+    async fn key_changing_rerun_leaves_stale_rows_and_reports_them() {
+        let db = test_db().await;
+        let now = datetime("2026-07-30 08:00:00");
+        // Stand in for an earlier import that placed this night a day over.
+        for day in ["2026-07-26", "2026-07-27"] {
+            daily_metric::ActiveModel {
+                kind: Set(MetricKind::SleepTotal),
+                date: Set(date(day)),
+                value: Set(9.9),
+                created_at: Set(now),
+                updated_at: Set(now),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .expect("seed");
+        }
+
+        let xml = r#"<HealthData>
+          <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Watch"
+                  value="HKCategoryValueSleepAnalysisAsleepCore"
+                  startDate="2026-07-25 23:00:00 -0700" endDate="2026-07-26 05:00:00 -0700"/>
+          <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Watch"
+                  value="HKCategoryValueSleepAnalysisAsleepCore"
+                  startDate="2026-07-27 23:00:00 -0700" endDate="2026-07-28 05:00:00 -0700"/>
+        </HealthData>"#;
+        let report = import(&db, xml).await;
+
+        // 2026-07-27 sits inside the imported range but was not produced.
+        let stale = report
+            .stale_rows
+            .iter()
+            .find(|s| s.kind == MetricKind::SleepTotal)
+            .expect("stale sleep-total row reported");
+        assert_eq!(stale.count, 1);
+        assert_eq!(stale.sample_dates, vec![date("2026-07-27")]);
+        assert_eq!(report.stale_rows_deleted, 0, "reporting must not delete");
+        assert!(
+            daily_metric::Entity::find()
+                .all(&db)
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.date == date("2026-07-27") && (r.value - 9.9).abs() < 1e-9),
+            "the stale row is still there — that is the point"
+        );
+
+        // …and --replace-range is the remedy.
+        let replaced = import_replacing(&db, xml).await;
+        assert_eq!(replaced.stale_rows_deleted, 1);
+        assert!(
+            !daily_metric::Entity::find()
+                .all(&db)
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.date == date("2026-07-27")),
+            "replace-range must remove the row this run did not write"
+        );
     }
 
     /// Last-write-wins means the backfill overwrites live HAE rows. It must
@@ -738,12 +1060,15 @@ mod tests {
     async fn sleep_day_shift_detects_an_offset_night() {
         let db = test_db().await;
         let now = datetime("2026-07-30 08:00:00");
-        // Existing rows carrying our night's 6.0 hours one day EARLIER, plus
-        // unrelated neighbours so the comparison has something to reject.
+        // Existing rows carrying our night's ~6 hours one day EARLIER, plus
+        // unrelated neighbours so the comparison has something to reject. The
+        // 5.97 is deliberately NOT 6.0: an independently-computed rollup never
+        // matches a reconstruction bit-for-bit, and exact equality is what
+        // flags a self-comparison.
         for (day, hours) in [
-            ("2026-07-27", 6.0),
-            ("2026-07-28", 1.0),
-            ("2026-07-29", 1.0),
+            ("2026-07-27", 5.97),
+            ("2026-07-28", 1.2),
+            ("2026-07-29", 1.1),
         ] {
             daily_metric::ActiveModel {
                 kind: Set(MetricKind::SleepTotal),
@@ -784,21 +1109,42 @@ mod tests {
         );
     }
 
-    /// Re-importing unchanged data fits every offset equally well. That is the
-    /// common case on a second run, and it is not evidence of a shift.
-    #[tokio::test]
-    async fn identical_reimport_does_not_report_a_boundary_mismatch() {
-        let db = test_db().await;
-        import(&db, FIXTURE).await;
-        let second = import(&db, FIXTURE).await;
+    /// Three consecutive nights, so every night has both neighbours and the
+    /// comparison can actually run.
+    const THREE_NIGHTS: &str = r#"<HealthData>
+      <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Watch"
+              value="HKCategoryValueSleepAnalysisAsleepCore"
+              startDate="2026-07-26 23:00:00 -0700" endDate="2026-07-27 05:00:00 -0700"/>
+      <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Watch"
+              value="HKCategoryValueSleepAnalysisAsleepCore"
+              startDate="2026-07-27 23:00:00 -0700" endDate="2026-07-28 06:00:00 -0700"/>
+      <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Watch"
+              value="HKCategoryValueSleepAnalysisAsleepCore"
+              startDate="2026-07-28 22:30:00 -0700" endDate="2026-07-29 05:30:00 -0700"/>
+    </HealthData>"#;
 
-        assert_eq!(
-            second.sleep_day_shift.best_offset(),
-            Some(0),
-            "ties must resolve to same-day: {:?}",
+    /// Once an import has run, last-write-wins means the rows it would compare
+    /// against are its own output. Reporting that as agreement would retire the
+    /// one question this importer cannot otherwise answer — and after a genuine
+    /// boundary fix it would actively argue against the correct answer, making
+    /// the prescribed fix-and-re-run loop oscillate forever.
+    #[tokio::test]
+    async fn reimport_detects_that_it_is_reading_its_own_output() {
+        let db = test_db().await;
+        import(&db, THREE_NIGHTS).await;
+        let second = import(&db, THREE_NIGHTS).await;
+
+        assert!(
+            matches!(second.sleep_day_shift, SleepDayShift::SelfComparison { .. }),
+            "expected a self-comparison, got {:?}",
             second.sleep_day_shift
         );
-        assert_eq!(second.sleep_day_shift.verdict(), SleepDayVerdict::Agrees);
+        assert_eq!(
+            second.sleep_day_shift.verdict(),
+            SleepDayVerdict::Unverified,
+            "comparing against yourself verifies nothing"
+        );
+        assert_eq!(second.sleep_day_shift.best_offset(), None);
     }
 
     #[test]
@@ -806,9 +1152,9 @@ mod tests {
         // Better, but neither proportionally nor absolutely decisive.
         let shift = SleepDayShift::Compared {
             compared_days: 100,
-            prev_day: Some(0.30),
-            same_day: Some(0.34),
-            next_day: None,
+            prev_day: 0.30,
+            same_day: 0.34,
+            next_day: 9.0,
         };
         assert_eq!(shift.best_offset(), Some(-1));
         assert_eq!(shift.verdict(), SleepDayVerdict::Agrees);
@@ -816,11 +1162,53 @@ mod tests {
         // Decisively better on both counts.
         let shift = SleepDayShift::Compared {
             compared_days: 100,
-            prev_day: Some(0.10),
-            same_day: Some(4.80),
-            next_day: None,
+            prev_day: 0.10,
+            same_day: 4.80,
+            next_day: 9.0,
         };
         assert_eq!(shift.verdict(), SleepDayVerdict::Mismatch { offset: -1 });
+
+        // An exact tie is not evidence of anything.
+        let shift = SleepDayShift::Compared {
+            compared_days: 100,
+            prev_day: 0.0,
+            same_day: 0.0,
+            next_day: 0.0,
+        };
+        assert_eq!(shift.best_offset(), Some(0));
+        assert_eq!(shift.verdict(), SleepDayVerdict::Agrees);
+    }
+
+    /// The three means must share a denominator. Accumulating each over
+    /// whatever days happen to have a stored row lets one sparse row produce a
+    /// confident verdict out of nothing.
+    #[tokio::test]
+    async fn a_single_sparse_row_cannot_produce_a_verdict() {
+        let db = test_db().await;
+        let now = datetime("2026-07-30 08:00:00");
+        // Exactly one stored row, on the middle night only.
+        daily_metric::ActiveModel {
+            kind: Set(MetricKind::SleepTotal),
+            date: Set(date("2026-07-28")),
+            value: Set(2.0),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("seed");
+
+        let report = import(&db, THREE_NIGHTS).await;
+        assert_eq!(
+            report.sleep_day_shift,
+            SleepDayShift::NoComparableRows,
+            "no night has all three neighbours stored, so nothing is comparable"
+        );
+        assert_eq!(
+            report.sleep_day_shift.verdict(),
+            SleepDayVerdict::Unverified
+        );
     }
 
     /// Upsert never deletes, so a name promoted into the curated vocabulary
@@ -922,6 +1310,60 @@ mod tests {
             rows[0].date,
             date("2015-03-11"),
             "the latest run's sighting wins"
+        );
+    }
+
+    /// Stale detection is scoped to each kind's OWN date range. One range
+    /// shared across every kind would stretch a sparse metric's window over the
+    /// whole import: a decade of heart rate beside two weigh-ins would sweep in
+    /// every weight row the live push landed in between — and `--replace-range`
+    /// would then delete real data.
+    #[tokio::test]
+    async fn stale_detection_does_not_bleed_across_kinds() {
+        let db = test_db().await;
+        let now = datetime("2026-07-30 08:00:00");
+        // A live-ingested weigh-in in the middle of the import's overall span,
+        // but outside the range this import's own weight rows cover.
+        daily_metric::ActiveModel {
+            kind: Set(MetricKind::Weight),
+            date: Set(date("2026-07-15")),
+            value: Set(198.0),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("seed live weigh-in");
+
+        // Heart rate spans 07-01..07-28; weight appears only on 07-28.
+        let report = import(
+            &db,
+            r#"<HealthData>
+              <Record type="HKQuantityTypeIdentifierHeartRate" unit="count/min"
+                      startDate="2026-07-01 08:00:00 -0700" endDate="2026-07-01 08:00:00 -0700" value="60"/>
+              <Record type="HKQuantityTypeIdentifierHeartRate" unit="count/min"
+                      startDate="2026-07-28 08:00:00 -0700" endDate="2026-07-28 08:00:00 -0700" value="62"/>
+              <Record type="HKQuantityTypeIdentifierBodyMass" unit="lb"
+                      startDate="2026-07-28 06:00:00 -0700" endDate="2026-07-28 06:00:00 -0700" value="200"/>
+            </HealthData>"#,
+        )
+        .await;
+
+        assert!(
+            report.stale_rows.is_empty(),
+            "the 07-15 weigh-in is outside the weight rows' own range and must not be flagged: \
+             {:?}",
+            report.stale_rows
+        );
+        assert!(
+            daily_metric::Entity::find()
+                .all(&db)
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.kind == MetricKind::Weight && r.date == date("2026-07-15")),
+            "the live weigh-in must survive"
         );
     }
 

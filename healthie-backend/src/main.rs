@@ -49,7 +49,10 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Command::ImportAppleHealth { path } => import_apple_health(path, db).await,
+        Command::ImportAppleHealth {
+            path,
+            replace_range,
+        } => import_apple_health(path, replace_range, db).await,
     }
 }
 
@@ -58,13 +61,18 @@ async fn main() -> anyhow::Result<()> {
 /// The parse is synchronous and can run for minutes on a multi-gigabyte file,
 /// so it goes to a blocking thread rather than stalling a runtime worker; only
 /// the (fast) database write happens on the async side.
-async fn import_apple_health(path: PathBuf, db: DatabaseConnection) -> anyhow::Result<()> {
+async fn import_apple_health(
+    path: PathBuf,
+    replace_range: bool,
+    db: DatabaseConnection,
+) -> anyhow::Result<()> {
     let parse_path = path.clone();
     tracing::info!(path = %path.display(), "parsing Apple Health export");
     let parsed =
         tokio::task::spawn_blocking(move || import::parse_export_xml(&parse_path)).await??;
 
-    let report = import::persist_import(&db, parsed).await?;
+    let options = import::ImportOptions { replace_range };
+    let report = import::persist_import(&db, parsed, options).await?;
     print!("{}", apple_health::render(&report, &path));
     Ok(())
 }

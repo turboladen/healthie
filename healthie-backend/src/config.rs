@@ -39,13 +39,27 @@ pub enum Command {
     },
     /// One-time backfill of an Apple Health `export.xml` into `daily_metric`.
     ///
-    /// Idempotent: `(kind, date)` upserts last-write-wins, so re-running after
-    /// a mapping fix re-lands cleanly. Note that it therefore also overwrites
-    /// rows a live HAE push already landed — the report quantifies how far the
-    /// two disagreed before replacing them.
+    /// `(kind, date)` upserts last-write-wins, so it also overwrites rows a live
+    /// HAE push already landed — the report quantifies how far the two
+    /// disagreed before replacing them.
+    ///
+    /// Re-running is idempotent for fixes that change a row's VALUE (a unit
+    /// correction). It is NOT for fixes that change a row's KEY — a sleep-day
+    /// boundary or metric-mapping change moves rows to other dates or kinds and
+    /// leaves the old ones behind. Those are reported; `--replace-range`
+    /// deletes them.
     ImportAppleHealth {
         /// Path to `export.xml` (from the Health app's "Export All Health Data").
         path: PathBuf,
+
+        /// Delete pre-existing rows inside the imported range that this run did
+        /// not produce.
+        ///
+        /// Use after changing the sleep-day boundary or a metric mapping, when
+        /// the previous import's rows are known to be wrong. Deletes real data,
+        /// so it is opt-in: run without it first and read the report.
+        #[arg(long)]
+        replace_range: bool,
     },
 }
 
@@ -109,13 +123,36 @@ mod tests {
             "/data/apple_health_export/export.xml",
         ])
         .expect("parse");
-        let Some(Command::ImportAppleHealth { path }) = cli.command else {
+        let Some(Command::ImportAppleHealth {
+            path,
+            replace_range,
+        }) = cli.command
+        else {
             panic!("expected import-apple-health subcommand");
         };
         assert_eq!(
             path,
             std::path::PathBuf::from("/data/apple_health_export/export.xml")
         );
+        assert!(
+            !replace_range,
+            "deleting existing rows must be opt-in, never the default"
+        );
+    }
+
+    #[test]
+    fn import_apple_health_accepts_replace_range() {
+        let cli = Cli::try_parse_from([
+            "healthie-backend",
+            "import-apple-health",
+            "--replace-range",
+            "export.xml",
+        ])
+        .expect("parse");
+        let Some(Command::ImportAppleHealth { replace_range, .. }) = cli.command else {
+            panic!("expected import-apple-health subcommand");
+        };
+        assert!(replace_range);
     }
 
     #[test]

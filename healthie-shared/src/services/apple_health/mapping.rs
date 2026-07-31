@@ -140,22 +140,42 @@ pub(crate) const HK_METRICS: &[(&str, &str, MetricKind)] = &[
     ),
 ];
 
-/// `export.xml` names we have seen and deliberately do not curate — the mirror
-/// of [`EXCLUDED_HAE_NAMES`](crate::services::metrics::EXCLUDED_HAE_NAMES).
+/// `export.xml` names we have seen and deliberately do not curate, paired with
+/// the [`EXCLUDED_HAE_NAMES`](crate::services::metrics::EXCLUDED_HAE_NAMES)
+/// spelling of the same metric.
+///
+/// Paired for the same reason [`HK_METRICS`] is: a list of two independent
+/// name sets can drift onto entirely different metrics while every count-based
+/// check still passes. Pairing makes the correspondence the thing under test.
 ///
 /// This list is what keeps quarantine *exceptional* on the backfill path:
 /// `BasalEnergyBurned` alone contributes hundreds of thousands of records to a
 /// decade of history, and without an explicit decline it would dominate the
 /// import report and bury genuinely new names.
-pub(crate) const EXCLUDED_HK_NAMES: &[&str] = &[
-    "HKCategoryTypeIdentifierAppleStandHour",
-    "HKQuantityTypeIdentifierBasalEnergyBurned",
-    "HKQuantityTypeIdentifierPhysicalEffort",
-    "HKQuantityTypeIdentifierAppleSleepingWristTemperature",
-    "HKQuantityTypeIdentifierTimeInDaylight",
-    "HKQuantityTypeIdentifierWalkingHeartRateAverage",
-    "HKQuantityTypeIdentifierEnvironmentalAudioExposure",
-    "HKQuantityTypeIdentifierHeadphoneAudioExposure",
+pub(crate) const EXCLUDED_HK_NAMES: &[(&str, &str)] = &[
+    ("HKCategoryTypeIdentifierAppleStandHour", "apple_stand_hour"),
+    (
+        "HKQuantityTypeIdentifierBasalEnergyBurned",
+        "basal_energy_burned",
+    ),
+    ("HKQuantityTypeIdentifierPhysicalEffort", "physical_effort"),
+    (
+        "HKQuantityTypeIdentifierAppleSleepingWristTemperature",
+        "apple_sleeping_wrist_temperature",
+    ),
+    ("HKQuantityTypeIdentifierTimeInDaylight", "time_in_daylight"),
+    (
+        "HKQuantityTypeIdentifierWalkingHeartRateAverage",
+        "walking_heart_rate_average",
+    ),
+    (
+        "HKQuantityTypeIdentifierEnvironmentalAudioExposure",
+        "environmental_audio_exposure",
+    ),
+    (
+        "HKQuantityTypeIdentifierHeadphoneAudioExposure",
+        "headphone_audio_exposure",
+    ),
 ];
 
 /// Classify an `export.xml` `type` attribute into curated / sleep / excluded /
@@ -167,7 +187,7 @@ pub(crate) fn map_hk_name(name: &str) -> HkMapping {
     if let Some((_, _, kind)) = HK_METRICS.iter().find(|(hk, _, _)| *hk == name) {
         return HkMapping::Curated(*kind);
     }
-    if EXCLUDED_HK_NAMES.contains(&name) {
+    if EXCLUDED_HK_NAMES.iter().any(|(hk, _)| *hk == name) {
         return HkMapping::Excluded;
     }
     HkMapping::Unknown
@@ -262,6 +282,9 @@ mod tests {
         )
     }
 
+    /// Equal length alone would pass with the two lists declining entirely
+    /// different metrics, so assert the correspondence itself: each pair's HAE
+    /// spelling must be the one the live path declines.
     #[test]
     fn excluded_hk_mirrors_excluded_hae() {
         assert_eq!(
@@ -269,8 +292,17 @@ mod tests {
             EXCLUDED_HAE_NAMES.len(),
             "the two exclude lists must stay in lockstep"
         );
-        for name in EXCLUDED_HK_NAMES {
-            assert_eq!(map_hk_name(name), HkMapping::Excluded, "{name}");
+        for (hk, hae) in EXCLUDED_HK_NAMES {
+            assert_eq!(map_hk_name(hk), HkMapping::Excluded, "{hk}");
+            assert!(
+                EXCLUDED_HAE_NAMES.contains(hae),
+                "{hk} is declined on the backfill path but its HAE counterpart {hae} is not \
+                 declined on the live path"
+            );
+            assert!(
+                matches!(map_hae_name(hae), HaeMapping::Excluded),
+                "{hae} must classify as excluded, not curated or unknown"
+            );
         }
     }
 
