@@ -2,7 +2,7 @@
 //! is kept from the retired M1b MCP server. Binds 0.0.0.0 by default (designed
 //! for Tailscale exposure; the bearer middleware is the gate).
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use healthie_shared::entities::auth_token::TokenKind;
@@ -36,6 +36,16 @@ pub enum Command {
         kind: TokenKindArg,
         #[command(subcommand)]
         action: TokenAction,
+    },
+    /// One-time backfill of an Apple Health `export.xml` into `daily_metric`.
+    ///
+    /// Idempotent: `(kind, date)` upserts last-write-wins, so re-running after
+    /// a mapping fix re-lands cleanly. Note that it therefore also overwrites
+    /// rows a live HAE push already landed — the report quantifies how far the
+    /// two disagreed before replacing them.
+    ImportAppleHealth {
+        /// Path to `export.xml` (from the Health app's "Export All Health Data").
+        path: PathBuf,
     },
 }
 
@@ -89,6 +99,31 @@ mod tests {
         assert!(matches!(kind, TokenKindArg::Ingest));
         assert!(matches!(action, TokenAction::Provision));
         assert_eq!(TokenKind::from(kind), TokenKind::Ingest);
+    }
+
+    #[test]
+    fn import_apple_health_parses_with_a_path() {
+        let cli = Cli::try_parse_from([
+            "healthie-backend",
+            "import-apple-health",
+            "/data/apple_health_export/export.xml",
+        ])
+        .expect("parse");
+        let Some(Command::ImportAppleHealth { path }) = cli.command else {
+            panic!("expected import-apple-health subcommand");
+        };
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/data/apple_health_export/export.xml")
+        );
+    }
+
+    #[test]
+    fn import_apple_health_requires_a_path() {
+        assert!(
+            Cli::try_parse_from(["healthie-backend", "import-apple-health"]).is_err(),
+            "the path is mandatory — importing nothing silently would be worse"
+        );
     }
 
     #[test]
