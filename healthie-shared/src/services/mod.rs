@@ -1,3 +1,4 @@
+pub mod apple_health;
 pub mod auth_token;
 pub mod briefing;
 pub mod checkin;
