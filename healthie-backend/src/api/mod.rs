@@ -1,7 +1,7 @@
-//! HTTP surface. The `/api/health` + `/ingest/hae` routes run under permissive
-//! CORS; the MCP router is mounted OUTSIDE CORS so browsers cannot drive its
-//! tools. The bearer(ingest) auth layer on `/ingest/hae` lands in Task 9 — until
-//! then no route is gated (health must never sit behind ingest auth).
+//! HTTP surface. `/api/health` and `/ingest/hae` run under permissive CORS; the
+//! MCP router is mounted OUTSIDE CORS so browsers cannot drive its tools. The
+//! bearer(ingest) gate is route-scoped to `/ingest/hae` alone, so `/api/health`
+//! is never behind it.
 
 pub mod error;
 pub mod health;
