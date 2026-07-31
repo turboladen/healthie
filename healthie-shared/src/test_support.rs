@@ -154,7 +154,7 @@ mod tests {
             .all(&db)
             .await
             .unwrap();
-        crate::entities::mcp_token::Entity::find()
+        crate::entities::auth_token::Entity::find()
             .all(&db)
             .await
             .unwrap();

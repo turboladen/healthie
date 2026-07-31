@@ -3,6 +3,8 @@ use sea_orm_migration::prelude::*;
 mod m20260716_000001_initial_schema;
 mod m20260717_000002_mcp_token;
 mod m20260718_000003_claims;
+mod m20260730_000004_daily_metric;
+mod m20260730_000005_auth_token;
 
 pub struct Migrator;
 
@@ -13,6 +15,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260716_000001_initial_schema::Migration),
             Box::new(m20260717_000002_mcp_token::Migration),
             Box::new(m20260718_000003_claims::Migration),
+            Box::new(m20260730_000004_daily_metric::Migration),
+            Box::new(m20260730_000005_auth_token::Migration),
         ]
     }
 }

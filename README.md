@@ -15,26 +15,33 @@ just ci                  # full gate: build + test + clippy
 cargo test --workspace
 ```
 
-## Run the MCP server
+## Run the backend
+
+`healthie-backend` is the single deployed binary: the REST API, `POST
+/ingest/hae` (Health Auto Export intake), and the MCP router mounted at `/mcp`.
 
 ```bash
-# Provision the bearer token — printed ONCE, store it now.
-healthie-mcp token provision
+# Provision a bearer token — printed ONCE, store it now. --kind is mcp | ingest.
+healthie-backend token --kind mcp provision
+healthie-backend token --kind ingest provision
 
 # Serve (defaults: --db-path data/healthie.db, --listen 0.0.0.0:3005).
-healthie-mcp serve
+healthie-backend serve
 
 # Exposing over Tailscale? rmcp's DNS-rebinding defense rejects unknown Host
 # headers — allowlist your hostnames (comma-separated; blank = any port):
-HEALTHIE_MCP_ALLOWED_HOSTS=odroid.tailnet.ts.net,dietpi.local:3005 healthie-mcp serve
+HEALTHIE_MCP_ALLOWED_HOSTS=odroid.tailnet.ts.net,dietpi.local:3005 healthie-backend serve
 
-# Rotate or revoke the token:
-healthie-mcp token provision   # rotates; previous token stops working
-healthie-mcp token revoke      # all requests 401 until re-provisioned
+# Rotate or revoke a token (per kind):
+healthie-backend token --kind ingest provision   # rotates; previous token stops working
+healthie-backend token --kind ingest revoke      # that kind's requests 401 until re-provisioned
 ```
 
-Every request needs `Authorization: Bearer <token>`; the token is stored only as
-an argon2id hash and never logged.
+The MCP surface (`/mcp`) and `/ingest/hae` each require `Authorization: Bearer
+<token>` of the matching kind; tokens are stored only as argon2id hashes and
+never logged. Point the Health Auto Export automation's REST target at
+`http(s)://<host>:3005/ingest/hae` with the ingest token. `GET /api/health`
+needs no token.
 
 ## Project docs
 
@@ -49,4 +56,8 @@ briefing assembler). M1b complete: `healthie-mcp` — bearer-authed rmcp server
 until the M2 backend nests its `router()`. M1c complete: claims-with-confidence
 registry + intake tools (`run_baseline_intake`, `record_intake_answers`,
 `update_claim`, `get_claims`) and the `baseline_intake` prompt — 19 tools total.
-Next: `healthie-backend` + Svelte SPA.
+M2 complete: `healthie-backend` is the single deployed binary — `GET
+/api/health`, bearer-authed `POST /ingest/hae` into a curated `daily_metric`
+store (unknown metrics quarantined), and the MCP `router()` nested at `/mcp`;
+`healthie-mcp` is now a library (ADR-0005). Next: Svelte SPA + M2b metric
+trends/recommendations.

@@ -43,37 +43,6 @@ impl MigrationTrait for Migration {
             .await
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
-
-    use crate::{
-        entities::mcp_token,
-        test_support::{datetime, test_db},
-    };
-
-    #[tokio::test]
-    async fn mcp_token_table_round_trips() {
-        let db = test_db().await;
-        let now = datetime("2026-07-17 08:00:00");
-        // Never .save() with a Set PK — insert explicitly (repo convention).
-        mcp_token::ActiveModel {
-            id: Set(1),
-            token_hash: Set("$argon2id$stub".to_owned()),
-            fingerprint: Set("abcd1234".to_owned()),
-            created_at: Set(now),
-            updated_at: Set(now),
-        }
-        .insert(&db)
-        .await
-        .expect("insert singleton token row");
-
-        let found = mcp_token::Entity::find_by_id(1)
-            .one(&db)
-            .await
-            .expect("query")
-            .expect("row exists");
-        assert_eq!(found.fingerprint, "abcd1234");
-    }
-}
+// Round-trip coverage for the live token table moved to the auth_token
+// migration (ADR-0005): m0005 drops this transient `mcp_token`, so a test that
+// inserts into it here would fail against the fully migrated schema.

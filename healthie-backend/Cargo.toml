@@ -1,0 +1,33 @@
+[package]
+name = "healthie-backend"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "healthie_backend"
+path = "src/lib.rs"
+
+[[bin]]
+name = "healthie-backend"
+path = "src/main.rs"
+
+[dependencies]
+healthie-shared = { path = "../healthie-shared" }
+healthie-mcp = { path = "../healthie-mcp" }
+anyhow.workspace = true
+axum.workspace = true
+axum-extra.workspace = true
+tower-http.workspace = true
+tokio.workspace = true
+sea-orm.workspace = true
+sea-orm-migration.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+sqlx.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+healthie-shared = { path = "../healthie-shared", features = ["test-support"] }
+tower.workspace = true
