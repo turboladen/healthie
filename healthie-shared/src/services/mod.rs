@@ -4,6 +4,7 @@ pub mod checkin;
 pub mod claim;
 pub mod concern;
 pub mod goal;
+pub mod metrics;
 pub mod observation;
 pub mod plan;
 pub mod profile;

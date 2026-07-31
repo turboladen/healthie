@@ -111,6 +111,38 @@ pub enum MetricKind {
     TimeInBed,
 }
 
+impl MetricKind {
+    /// Canonical unit for this metric, derived from the kind (never stored).
+    /// Ingest logs a warning when HAE's `units` string disagrees. The match is
+    /// exhaustive with no wildcard on purpose: a new variant fails to compile
+    /// until it declares a unit.
+    #[must_use]
+    pub fn unit(self) -> &'static str {
+        match self {
+            Self::Weight => "lb",
+            Self::BodyFat | Self::GaitAsymmetry | Self::GaitDoubleSupport | Self::Spo2 => "%",
+            Self::Vo2Max => "ml/(kg·min)",
+            Self::RestingHeartRate
+            | Self::HeartRate
+            | Self::CardioRecovery
+            | Self::RespiratoryRate => "count/min",
+            Self::Hrv => "ms",
+            Self::BreathingDisturbances | Self::Steps => "count",
+            Self::ActiveEnergy => "kcal",
+            Self::ExerciseMinutes | Self::StandMinutes => "min",
+            Self::WalkingDistance => "mi",
+            Self::WalkingSpeed => "mi/hr",
+            Self::StepLength => "in",
+            Self::SleepTotal
+            | Self::SleepDeep
+            | Self::SleepRem
+            | Self::SleepCore
+            | Self::SleepAwake
+            | Self::TimeInBed => "hr",
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 
