@@ -98,9 +98,11 @@ async fn ingest_requires_bearer_and_returns_204() {
 
 #[tokio::test]
 async fn ingest_rejects_mcp_kind_token() {
-    // An Mcp-kind token must NOT authorize ingest — the ADR-0005 blast-radius
-    // separation, proven at the HTTP boundary.
-    let db = healthie_shared::test_support::test_db().await;
+    // An Mcp-kind token must NOT authorize ingest — proven at the HTTP boundary
+    // WHILE a valid ingest token also exists, so the 401 is a cross-kind
+    // rejection, not merely "no ingest token provisioned" (ADR-0005
+    // blast-radius separation).
+    let (app, ingest_token, db) = app_with_ingest_token().await;
     let mcp = healthie_shared::services::auth_token::provision(
         &db,
         healthie_shared::entities::auth_token::TokenKind::Mcp,
@@ -108,13 +110,31 @@ async fn ingest_rejects_mcp_kind_token() {
     .await
     .expect("provision mcp token")
     .plaintext;
-    let app = healthie_backend::api::router(healthie_backend::AppState { db: db.clone() }, db);
+    assert_ne!(ingest_token, mcp, "the two kinds get distinct plaintexts");
+
     let payload = serde_json::json!({ "data": { "metrics": [] } });
-    let resp = app.oneshot(ingest_req(Some(&mcp), &payload)).await.unwrap();
+
+    // The Mcp token is rejected even though a valid Ingest token is provisioned.
+    let resp = app
+        .clone()
+        .oneshot(ingest_req(Some(&mcp), &payload))
+        .await
+        .unwrap();
     assert_eq!(
         resp.status(),
         StatusCode::UNAUTHORIZED,
-        "an mcp token must not drive ingest"
+        "an mcp token must not drive ingest even when an ingest token exists"
+    );
+
+    // Positive control on the same app: the real ingest token still authorizes.
+    let resp = app
+        .oneshot(ingest_req(Some(&ingest_token), &payload))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "the ingest token must still authorize ingest"
     );
 }
 
