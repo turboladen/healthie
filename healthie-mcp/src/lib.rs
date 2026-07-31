@@ -1,14 +1,13 @@
 //! healthie-mcp — the MCP surface over `healthie-shared` (ADR-0002 M1b).
 //!
-//! A library exposing [`router`] (nested by the M2 backend at `/mcp`) plus a
-//! binary (`healthie-mcp serve|token`) that hosts it until the backend exists.
+//! A library exposing [`router`], mounted by `healthie-backend` at `/mcp` (the
+//! interim `healthie-mcp` binary was retired in M2 — ADR-0005).
 //! Transport is streamable HTTP in STATELESS mode: no session ids, plain JSON
 //! responses — server restarts never strand a client mid-conversation.
 //! Security: bearer-token middleware (see [`auth`]) + rmcp's Host allowlist
 //! (DNS-rebinding defense; extend via `HEALTHIE_MCP_ALLOWED_HOSTS`).
 
 pub mod auth;
-pub mod config;
 mod handler;
 mod prompts;
 mod schemas;

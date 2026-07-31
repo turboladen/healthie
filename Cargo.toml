@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["healthie-shared", "healthie-mcp"]
+members = ["healthie-shared", "healthie-mcp", "healthie-backend"]
 
 [workspace.package]
 edition = "2024"
@@ -24,6 +24,7 @@ base64 = "0.22"
 schemars = { version = "1", features = ["chrono04"] }
 axum = "0.8"
 axum-extra = { version = "0.10", features = ["typed-header"] }
+tower-http = { version = "0.7", features = ["cors"] }
 rmcp = { version = "2.2", features = ["server", "macros", "transport-streamable-http-server", "schemars"] }
 tower = "0.5"
 clap = { version = "4", features = ["derive", "env"] }
