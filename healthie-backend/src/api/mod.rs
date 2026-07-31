@@ -3,6 +3,7 @@
 //! tools. The bearer(ingest) auth layer on `/ingest/hae` lands in Task 9 — until
 //! then no route is gated (health must never sit behind ingest auth).
 
+pub mod error;
 pub mod health;
 pub mod ingest;
 
