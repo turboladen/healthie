@@ -12,9 +12,12 @@ use tower::ServiceExt;
 
 async fn setup() -> (Router, DatabaseConnection, String) {
     let db = healthie_shared::test_support::test_db().await;
-    let issued = healthie_shared::services::mcp_token::provision(&db)
-        .await
-        .expect("provision test token");
+    let issued = healthie_shared::services::auth_token::provision(
+        &db,
+        healthie_shared::entities::auth_token::TokenKind::Mcp,
+    )
+    .await
+    .expect("provision test token");
     (healthie_mcp::router(db.clone()), db, issued.plaintext)
 }
 
@@ -152,9 +155,12 @@ async fn unrecognized_token_is_401_before_rmcp() {
 #[tokio::test]
 async fn revoked_and_rotated_tokens_are_401() {
     let (app, db, token) = setup().await;
-    healthie_shared::services::mcp_token::revoke(&db)
-        .await
-        .expect("revoke");
+    healthie_shared::services::auth_token::revoke(
+        &db,
+        healthie_shared::entities::auth_token::TokenKind::Mcp,
+    )
+    .await
+    .expect("revoke");
     let (status, _) = post_rpc_as(
         &app,
         Some(&token),
@@ -163,9 +169,12 @@ async fn revoked_and_rotated_tokens_are_401() {
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "revoked token must fail");
 
-    let second = healthie_shared::services::mcp_token::provision(&db)
-        .await
-        .expect("rotate");
+    let second = healthie_shared::services::auth_token::provision(
+        &db,
+        healthie_shared::entities::auth_token::TokenKind::Mcp,
+    )
+    .await
+    .expect("rotate");
     let (status, _) = post_rpc_as(
         &app,
         Some(&token),

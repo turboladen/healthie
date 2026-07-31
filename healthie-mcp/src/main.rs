@@ -4,7 +4,7 @@
 
 use clap::Parser;
 use healthie_mcp::config::{Cli, Command, TokenAction};
-use healthie_shared::{migration::Migrator, services::mcp_token};
+use healthie_shared::{entities::auth_token::TokenKind, migration::Migrator, services::auth_token};
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 
@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Serve => serve(db, cli.listen).await,
         Command::Token { action } => match action {
             TokenAction::Provision => {
-                let issued = mcp_token::provision(&db).await?;
+                let issued = auth_token::provision(&db, TokenKind::Mcp).await?;
                 // The ONE permitted plaintext output, by design: shown once,
                 // never stored, never logged.
                 println!("MCP bearer token (shown once, store it now):");
@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(())
             }
             TokenAction::Revoke => {
-                mcp_token::revoke(&db).await?;
+                auth_token::revoke(&db, TokenKind::Mcp).await?;
                 println!("MCP token revoked. Provision a new one to restore access.");
                 Ok(())
             }

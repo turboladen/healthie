@@ -15,7 +15,7 @@ use axum_extra::{
     headers::{Authorization, authorization::Bearer},
     typed_header::TypedHeader,
 };
-use healthie_shared::services::mcp_token;
+use healthie_shared::{entities::auth_token::TokenKind, services::auth_token};
 use rmcp::{
     ErrorData as McpError,
     service::{RequestContext, RoleServer},
@@ -35,7 +35,7 @@ pub struct AuthenticatedOperator {
 ///
 /// Header parsing (scheme case, whitespace) is delegated to `axum_extra`'s
 /// `TypedHeader<Authorization<Bearer>>`; verification is the constant-time
-/// argon2id check in [`mcp_token::verify`]. On success the resolved
+/// argon2id check in [`auth_token::verify`]. On success the resolved
 /// [`AuthenticatedOperator`] rides the request into the tool handlers via
 /// request extensions. The presented token is never logged, even on failure.
 pub(crate) async fn require_mcp_token(
@@ -51,7 +51,7 @@ pub(crate) async fn require_mcp_token(
     if token.is_empty() {
         return unauthorized("missing Authorization: Bearer <mcp-token>");
     }
-    match mcp_token::verify(&db, token).await {
+    match auth_token::verify(&db, TokenKind::Mcp, token).await {
         Ok(Some(fingerprint)) => {
             req.extensions_mut()
                 .insert(AuthenticatedOperator { fingerprint });
