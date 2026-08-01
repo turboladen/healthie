@@ -227,9 +227,21 @@ Writes obey ADR-0005 §5 — `(kind, date)` upsert, last-write-wins — so a bac
 overwrites rows a live HAE push already landed. That is the stated contract and
 this path keeps it, with no date-fencing flag.
 
-**Re-running is idempotent for value changes, not for key changes**, and the
-distinction matters more than it first appears. A corrected unit or aggregation
-rewrites the same `(kind, date)` rows, so the old figures are fully replaced. A
+**"Idempotent" is three claims, and only two of them hold.** Re-running the same
+import converges, and a **value**-changing fix (a corrected unit or aggregation)
+converges, because both rewrite the same `(kind, date)` keys.
+
+Neither is **non-destructive**, which is the claim a reader is most likely to
+infer and the one that is false. Last-write-wins overwrites whatever occupied
+that key — including rows the live HAE push landed — and that is not
+recoverable. Once the backend is deployed and HAE has been ingesting for months,
+re-importing a corrected export clobbers good live rows on every overlapping
+date, with `--replace-range` nowhere in sight. So the command surveys
+`daily_metric` and warns **before parsing**, while aborting still costs nothing;
+it stays silent on an empty store, because a warning that always fires is one
+nobody reads.
+
+A **key**-changing fix is the third case and fails even the convergence claim. A
 corrected **sleep-day boundary** — precisely the fix the day-shift check
 prescribes — moves nights onto different dates, and a re-mapped metric name moves
 rows to a different kind. Upsert never deletes, so at the trailing edge of every

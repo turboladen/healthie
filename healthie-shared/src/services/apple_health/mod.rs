@@ -32,11 +32,17 @@
 //!   rows *before* overwriting them, because that comparison is the only
 //!   available check on whether the two paths agree — and only on the first
 //!   run, since afterwards those rows are this importer's own output.
-//! - **Re-running is idempotent for value changes, not for key changes.** A
-//!   corrected unit or aggregation rewrites the same `(kind, date)` rows. A
-//!   corrected *sleep-day boundary* or metric mapping moves rows to different
-//!   dates or kinds, and nothing deletes what sat at the old ones — see
+//! - **"Idempotent" is three claims, and only two of them hold.** Re-running
+//!   the *same* import converges, and a **value**-changing fix (a unit or
+//!   aggregation correction) converges, because both rewrite the same
+//!   `(kind, date)` keys. But **neither is non-destructive toward rows that
+//!   came from somewhere else**: last-write-wins overwrites whatever occupied
+//!   that key, including rows the live HAE push landed, and that is not
+//!   reversible. A **key**-changing fix (a sleep-day boundary or metric
+//!   mapping) additionally strands rows at the old keys — see
 //!   [`ImportReport::stale_rows`] and [`ImportOptions::replace_range`].
+//!   [`survey_existing`] exists so a caller can warn about this *before*
+//!   parsing.
 
 pub(crate) mod accumulate;
 pub(crate) mod mapping;
@@ -51,7 +57,10 @@ use std::{
 };
 
 use chrono::NaiveDate;
-use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, TransactionTrait};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, QuerySelect,
+    TransactionTrait,
+};
 
 use self::{
     accumulate::{Accumulator, PendingRow},
@@ -329,6 +338,51 @@ pub struct ImportReport {
     /// truncated. Rows that look stale against a partial file are mostly rows
     /// the file simply does not reach.
     pub replace_range_refused_truncated: bool,
+}
+
+/// What the store already holds, for the pre-flight check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExistingData {
+    pub rows: u64,
+    pub date_range: Option<(NaiveDate, NaiveDate)>,
+}
+
+impl ExistingData {
+    /// Nothing stored yet, so an import has nothing to overwrite.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows == 0
+    }
+}
+
+/// Count and date span of what is already in `daily_metric`.
+///
+/// Deliberately cheap and separate from [`persist_import`] so a caller can run
+/// it **before** parsing: on a multi-gigabyte export the parse takes minutes,
+/// and a warning about irreversible overwriting is only useful while there is
+/// still time to abort.
+///
+/// # Errors
+/// Returns [`DomainError::Db`] on database failure.
+pub async fn survey_existing<C: ConnectionTrait>(db: &C) -> DomainResult<ExistingData> {
+    let rows = daily_metric::Entity::find().count(db).await?;
+    if rows == 0 {
+        return Ok(ExistingData {
+            rows: 0,
+            date_range: None,
+        });
+    }
+    let span: Option<(Option<NaiveDate>, Option<NaiveDate>)> = daily_metric::Entity::find()
+        .select_only()
+        .column_as(daily_metric::Column::Date.min(), "from_date")
+        .column_as(daily_metric::Column::Date.max(), "to_date")
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(ExistingData {
+        rows,
+        date_range: span.and_then(|(from, to)| from.zip(to)),
+    })
 }
 
 /// Parse an `export.xml` from disk. Synchronous and database-free.
@@ -817,7 +871,7 @@ mod tests {
 
     use super::{
         ImportOptions, ImportReport, SleepDayShift, SleepDayVerdict, parse_export_reader,
-        persist_import,
+        persist_import, survey_existing,
     };
     use crate::{
         entities::{daily_metric, daily_metric::MetricKind, quarantined_metric},
@@ -1407,6 +1461,27 @@ mod tests {
                 .iter()
                 .any(|r| r.kind == MetricKind::Weight && r.date == date("2026-07-15")),
             "the live weigh-in must survive"
+        );
+    }
+
+    /// The pre-flight check must be able to answer "is there anything to lose?"
+    /// without touching the export, so it can run before the parse.
+    #[tokio::test]
+    async fn survey_reports_what_the_store_already_holds() {
+        let db = test_db().await;
+        let empty = survey_existing(&db).await.expect("survey");
+        assert!(empty.is_empty());
+        assert_eq!(empty.rows, 0);
+        assert_eq!(empty.date_range, None);
+
+        import(&db, FIXTURE).await;
+
+        let after = survey_existing(&db).await.expect("survey");
+        assert!(!after.is_empty());
+        assert_eq!(after.rows, 4);
+        assert_eq!(
+            after.date_range,
+            Some((date("2026-07-28"), date("2026-07-28")))
         );
     }
 

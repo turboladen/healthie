@@ -39,15 +39,18 @@ pub enum Command {
     },
     /// One-time backfill of an Apple Health `export.xml` into `daily_metric`.
     ///
-    /// `(kind, date)` upserts last-write-wins, so it also overwrites rows a live
-    /// HAE push already landed — the report quantifies how far the two
-    /// disagreed before replacing them.
+    /// BACK UP THE DATABASE FIRST if it already holds data. `(kind, date)`
+    /// upserts last-write-wins, so ANY import — with or without
+    /// `--replace-range` — irreversibly overwrites whatever occupied the keys
+    /// it produces, including rows the live HAE push landed. The command warns
+    /// before it starts when the store is non-empty.
     ///
-    /// Re-running is idempotent for fixes that change a row's VALUE (a unit
-    /// correction). It is NOT for fixes that change a row's KEY — a sleep-day
-    /// boundary or metric-mapping change moves rows to other dates or kinds and
-    /// leaves the old ones behind. Those are reported; `--replace-range`
-    /// deletes them.
+    /// "Idempotent" here means two narrow things and not a third: re-running
+    /// the same import converges, and a fix that changes a row's VALUE (a unit
+    /// correction) converges. Neither is non-destructive toward rows from
+    /// another source. A fix that changes a row's KEY — a sleep-day boundary or
+    /// metric-mapping change — additionally strands rows at the old dates or
+    /// kinds; those are reported, and `--replace-range` deletes them.
     ImportAppleHealth {
         /// Path to `export.xml` (from the Health app's "Export All Health Data").
         path: PathBuf,

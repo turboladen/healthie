@@ -11,8 +11,62 @@
 use std::{fmt::Write as _, path::Path};
 
 use healthie_shared::services::apple_health::{
-    ImportReport, KindReport, SleepDayShift, SleepDayVerdict,
+    ExistingData, ImportReport, KindReport, SleepDayShift, SleepDayVerdict,
 };
+
+/// Warn, before anything is read or written, that an import into a store that
+/// already holds data is irreversible.
+///
+/// `None` when the store is empty: a first import has nothing to lose, and a
+/// warning that fires on every run is one nobody reads — the same reasoning
+/// that made the sleep day-shift check refuse to cry wolf.
+///
+/// This is the *pre*-flight half of the safety story. The report already
+/// mentions backups, but only after the write, and post-hoc advice is not a
+/// safeguard. Note that plain re-importing is destructive too: last-write-wins
+/// overwrites every colliding `(kind, date)`, including rows the live HAE push
+/// wrote, with or without `--replace-range`.
+#[must_use]
+pub fn preflight_warning(
+    existing: &ExistingData,
+    db_path: &str,
+    replace_range: bool,
+) -> Option<String> {
+    if existing.is_empty() {
+        return None;
+    }
+    let span = existing.date_range.map_or_else(
+        || "no dated rows".to_owned(),
+        |(from, to)| format!("{from} .. {to}"),
+    );
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "⚠  This database already holds {} daily_metric rows ({span}).",
+        existing.rows
+    );
+    // Line by line so rustfmt cannot rewrap it differently between runs.
+    for line in [
+        "   An import OVERWRITES any row it produces for the same (kind, date) — including",
+        "   rows the live HAE push wrote. That is not reversible.",
+    ] {
+        let _ = writeln!(out, "{line}");
+    }
+    if replace_range {
+        for line in [
+            "   --replace-range is set, so this run will ALSO DELETE pre-existing rows in the",
+            "   imported range that it does not itself produce. Both are irreversible.",
+        ] {
+            let _ = writeln!(out, "{line}");
+        }
+    }
+    let _ = writeln!(out, "   Back up {db_path} before continuing.");
+    let _ = writeln!(
+        out,
+        "   Nothing has been read or written yet — Ctrl-C now to abort.\n"
+    );
+    Some(out)
+}
 
 /// Format a finished import for stdout.
 #[must_use]
@@ -328,13 +382,13 @@ mod tests {
     use healthie_shared::{
         entities::daily_metric::MetricKind,
         services::apple_health::{
-            ImportReport, KindReport, Overlap, QuarantinedName, SleepDayShift, StaleRows,
-            SumSourceReport, UnconvertibleUnit,
+            ExistingData, ImportReport, KindReport, Overlap, QuarantinedName, SleepDayShift,
+            StaleRows, SumSourceReport, UnconvertibleUnit,
         },
         test_support::date,
     };
 
-    use super::render;
+    use super::{preflight_warning, render};
 
     fn base() -> ImportReport {
         ImportReport {
@@ -356,6 +410,57 @@ mod tests {
             document_closed: true,
             replace_range_refused_truncated: false,
         }
+    }
+
+    fn populated() -> ExistingData {
+        ExistingData {
+            rows: 50_877,
+            date_range: Some((date("2011-02-17"), date("2026-07-31"))),
+        }
+    }
+
+    /// The warning has to reach the operator while aborting is still possible,
+    /// and has to name the file they are being told to copy.
+    #[test]
+    fn preflight_warns_on_a_populated_database_and_names_the_path() {
+        let out = preflight_warning(&populated(), "/srv/healthie/data/healthie.db", false)
+            .expect("a populated store must warn");
+        assert!(out.contains("50877") || out.contains("50,877"), "{out}");
+        assert!(out.contains("2011-02-17 .. 2026-07-31"), "{out}");
+        assert!(out.contains("/srv/healthie/data/healthie.db"), "{out}");
+        assert!(out.contains("OVERWRITES"), "{out}");
+        assert!(out.contains("not reversible"), "{out}");
+        assert!(out.contains("Ctrl-C"), "{out}");
+    }
+
+    /// A first import into a fresh store has nothing to lose, and a warning
+    /// that fires every run is one nobody reads.
+    #[test]
+    fn preflight_is_silent_on_an_empty_database() {
+        let empty = ExistingData {
+            rows: 0,
+            date_range: None,
+        };
+        assert!(preflight_warning(&empty, "data/healthie.db", false).is_none());
+        assert!(
+            preflight_warning(&empty, "data/healthie.db", true).is_none(),
+            "even with --replace-range there is nothing to destroy"
+        );
+    }
+
+    /// A plain re-import overwrites; --replace-range overwrites AND deletes.
+    /// The warning must distinguish them.
+    #[test]
+    fn preflight_escalates_for_replace_range() {
+        let plain = preflight_warning(&populated(), "data/healthie.db", false).unwrap();
+        assert!(!plain.contains("DELETE"), "{plain}");
+
+        let replacing = preflight_warning(&populated(), "data/healthie.db", true).unwrap();
+        assert!(replacing.contains("ALSO DELETE"), "{replacing}");
+        assert!(replacing.contains("--replace-range is set"), "{replacing}");
+        // The overwrite warning survives the escalation rather than being
+        // replaced by it — that run does both.
+        assert!(replacing.contains("OVERWRITES"), "{replacing}");
     }
 
     #[test]

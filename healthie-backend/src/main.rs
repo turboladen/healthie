@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
         Command::ImportAppleHealth {
             path,
             replace_range,
-        } => import_apple_health(path, replace_range, db).await,
+        } => import_apple_health(path, replace_range, &cli.db_path, db).await,
     }
 }
 
@@ -64,8 +64,18 @@ async fn main() -> anyhow::Result<()> {
 async fn import_apple_health(
     path: PathBuf,
     replace_range: bool,
+    db_path: &str,
     db: DatabaseConnection,
 ) -> anyhow::Result<()> {
+    // Before the parse, not after the commit: on a multi-gigabyte export the
+    // parse runs for minutes, and a warning about irreversible overwriting is
+    // only a safeguard while there is still time to abort. Goes to stderr so it
+    // stays visible even when the report is piped to a file.
+    let existing = import::survey_existing(&db).await?;
+    if let Some(warning) = apple_health::preflight_warning(&existing, db_path, replace_range) {
+        eprint!("{warning}");
+    }
+
     let parse_path = path.clone();
     tracing::info!(path = %path.display(), "parsing Apple Health export");
     let parsed =
