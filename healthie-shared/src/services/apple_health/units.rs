@@ -76,6 +76,14 @@ pub(crate) fn convert_to_canonical(raw_unit: &str, kind: MetricKind, value: f64)
     if from == UCUM_PERCENT && to == UCUM_PERCENT {
         return Some(value * PERCENT_SCALE);
     }
+    // Second fast path, on the CODE rather than the spelling: `mL/min·kg` and
+    // `ml/(kg·min)` are not byte-identical to the canonical string but resolve
+    // to the same UCUM code, as does Apple's `Cal` against canonical `kcal`.
+    // Those are high-volume records, and a conversion to itself is unity — so
+    // short-circuit rather than parse two expressions per record to learn it.
+    if from == to {
+        return Some(value);
+    }
     // `Err` covers both an incomparable dimension and a code UCUM cannot
     // parse; either way the caller must not store the value.
     ucum::convert(value, from, to).ok()

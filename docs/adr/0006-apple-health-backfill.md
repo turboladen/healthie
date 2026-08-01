@@ -187,10 +187,10 @@ Apple's `Cal` (the kilocalorie) is resolved before case folding, because a
 lowercase `cal` is conventionally the small calorie — a 1000x difference. The
 ambiguous spelling is refused rather than guessed at.
 
-Having real dimensions also sharpens the refusal: `is_comparable` distinguishes
-a unit we have never heard of from one we know that measures the wrong thing, so
-`kg` on a distance metric is now rejected as incomparable rather than merely
-unmatched.
+Having real dimensions also sharpens the refusal: UCUM answers with an error
+rather than a wrong number when the two codes are dimensionally incomparable, so
+`kg` on a distance metric is rejected on its dimensions rather than merely for
+being unmatched.
 
 **Percent is the one unit where matching strings mean different scales.** Apple
 writes `%` for HealthKit's `HKUnit.percent()`, which is a **0-1 fraction**;

@@ -42,6 +42,62 @@ const RECORD: &[u8] = b"Record";
 /// not look hung.
 const PROGRESS_EVERY: u64 = 1_000_000;
 
+/// Why a record could not be stored, recorded in `raw_point._import.reason`.
+///
+/// A closed vocabulary, so an enum rather than bare string literals: the
+/// spellings are written here and read back in
+/// [`clear_promoted_quarantine`](super::clear_promoted_quarantine), and a typo
+/// on either side would silently disable the quarantine sweep — a failure with
+/// no symptom other than a stale row nobody looks at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuarantineReason {
+    /// The `type` attribute is not in the curated vocabulary.
+    UnknownType,
+    /// A `HKCategoryValueSleepAnalysis*` spelling we do not know.
+    UnknownSleepStage,
+    /// Curated name, but the record carried no `unit` at all.
+    MissingUnit,
+    /// Curated name, but no conversion covers its `unit`.
+    UnconvertibleUnit,
+}
+
+impl QuarantineReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownType => "unknown-type",
+            Self::UnknownSleepStage => "unknown-sleep-stage",
+            Self::MissingUnit => "missing-unit",
+            Self::UnconvertibleUnit => "unconvertible-unit",
+        }
+    }
+
+    /// Parse a reason back out of a stored row. `None` for anything this build
+    /// does not recognize — rows written by some future build must not be
+    /// mistaken for one of ours and swept.
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        [
+            Self::UnknownType,
+            Self::UnknownSleepStage,
+            Self::MissingUnit,
+            Self::UnconvertibleUnit,
+        ]
+        .into_iter()
+        .find(|reason| reason.as_str() == raw)
+    }
+
+    /// Whether this reason describes the *name*, and so stops applying the
+    /// moment that name joins the vocabulary.
+    ///
+    /// Deliberately not every reason: a curated metric can also be quarantined
+    /// because one record carried an unconvertible or missing unit, and those
+    /// rows describe a live data problem that promoting the name does nothing
+    /// about. Sweeping them would erase a standing complaint just because the
+    /// metric happens to be curated.
+    pub(crate) fn is_name_based(self) -> bool {
+        matches!(self, Self::UnknownType | Self::UnknownSleepStage)
+    }
+}
+
 /// One retained example of an uncurated name, plus how often it was seen.
 ///
 /// Deliberately one sample per name rather than one row per `(name, date)` as
@@ -112,21 +168,13 @@ pub(crate) fn parse_into_buf<R: BufRead>(
     loop {
         match xml.read_event_into(buf) {
             Ok(Event::Eof) => break,
+            // `<Record>` arrives in both shapes and both must be handled; only
+            // the one that opens an element moves the depth.
             Ok(Event::Start(e)) if e.name().as_ref() == RECORD => {
                 depth += 1;
-                stats.records_read += 1;
-                fold_record(&e, acc, stats);
-                if stats.records_read.is_multiple_of(PROGRESS_EVERY) {
-                    tracing::info!(records = stats.records_read, "export.xml parse progress");
-                }
+                read_record(&e, acc, stats);
             }
-            Ok(Event::Empty(e)) if e.name().as_ref() == RECORD => {
-                stats.records_read += 1;
-                fold_record(&e, acc, stats);
-                if stats.records_read.is_multiple_of(PROGRESS_EVERY) {
-                    tracing::info!(records = stats.records_read, "export.xml parse progress");
-                }
-            }
+            Ok(Event::Empty(e)) if e.name().as_ref() == RECORD => read_record(&e, acc, stats),
             Ok(Event::Start(_)) => depth += 1,
             Ok(Event::End(_)) => depth -= 1,
             Ok(_) => {}
@@ -145,6 +193,15 @@ pub(crate) fn parse_into_buf<R: BufRead>(
     Ok(())
 }
 
+/// Count one `<Record>`, fold it in, and keep the progress line ticking.
+fn read_record(e: &BytesStart<'_>, acc: &mut Accumulator, stats: &mut ImportStats) {
+    stats.records_read += 1;
+    fold_record(e, acc, stats);
+    if stats.records_read.is_multiple_of(PROGRESS_EVERY) {
+        tracing::info!(records = stats.records_read, "export.xml parse progress");
+    }
+}
+
 /// The attributes we care about, borrowed from the event buffer where possible.
 #[derive(Default)]
 struct RawRecord<'a> {
@@ -156,10 +213,17 @@ struct RawRecord<'a> {
     source: Option<Cow<'a, str>>,
 }
 
-impl RawRecord<'_> {
+impl<'a> RawRecord<'a> {
     /// Pull the attributes off one element. Attribute order varies between
     /// exports, so this matches by name and never by position.
-    fn extract(e: &BytesStart<'_>) -> Option<Self> {
+    ///
+    /// The values BORROW the event buffer wherever they can: `normalized_value`
+    /// only allocates when the raw text actually needs normalizing (an entity
+    /// reference, a tab or a newline inside the quotes), which no attribute in
+    /// a typical `export.xml` record does. Forcing `into_owned()` here would be
+    /// six heap allocations per record — tens of millions over a real export,
+    /// in the one loop this module goes to trouble to keep cheap.
+    fn extract(e: &'a BytesStart<'_>) -> Option<Self> {
         let mut rec = Self::default();
         for attr in e.attributes() {
             let attr = attr.ok()?;
@@ -172,18 +236,14 @@ impl RawRecord<'_> {
                 b"sourceName" => &mut rec.source,
                 _ => continue,
             };
-            *slot = Some(Cow::Owned(
-                attr.normalized_value(XmlVersion::Implicit1_0)
-                    .ok()?
-                    .into_owned(),
-            ));
+            *slot = Some(attr.normalized_value(XmlVersion::Implicit1_0).ok()?);
         }
         Some(rec)
     }
 
     /// The record verbatim, for quarantine. `reason` records why we could not
     /// store it; `records_seen` is filled in at persist time.
-    fn to_json(&self, reason: &str) -> Value {
+    fn to_json(&self, reason: QuarantineReason) -> Value {
         let mut map = Map::new();
         for (key, val) in [
             ("type", &self.ty),
@@ -198,7 +258,10 @@ impl RawRecord<'_> {
             }
         }
         let mut meta = Map::new();
-        meta.insert("reason".to_owned(), Value::String(reason.to_owned()));
+        meta.insert(
+            "reason".to_owned(),
+            Value::String(reason.as_str().to_owned()),
+        );
         map.insert("_import".to_owned(), Value::Object(meta));
         Value::Object(map)
     }
@@ -219,14 +282,18 @@ fn fold_record(e: &BytesStart<'_>, acc: &mut Accumulator, stats: &mut ImportStat
         stats.records_skipped += 1;
         return;
     };
-    let ty = ty.to_owned();
-
-    match map_hk_name(&ty) {
+    match map_hk_name(ty) {
         HkMapping::Excluded => stats.records_excluded += 1,
         HkMapping::Unknown => {
-            quarantine(stats, &ty, "unknown-type", &rec, start.date_naive());
+            quarantine(
+                stats,
+                ty,
+                QuarantineReason::UnknownType,
+                &rec,
+                start.date_naive(),
+            );
         }
-        HkMapping::Curated(kind) => fold_quantity(&ty, kind, start, &rec, acc, stats),
+        HkMapping::Curated(kind) => fold_quantity(ty, kind, start, &rec, acc, stats),
         HkMapping::Sleep => fold_sleep(&rec, start, acc, stats),
     }
 }
@@ -252,7 +319,13 @@ fn fold_quantity(
     // No unit means no way to know what the number means. Quarantine rather
     // than assume it was already canonical.
     let Some(unit) = rec.unit.as_deref() else {
-        quarantine(stats, ty, "missing-unit", rec, start.date_naive());
+        quarantine(
+            stats,
+            ty,
+            QuarantineReason::MissingUnit,
+            rec,
+            start.date_naive(),
+        );
         return;
     };
     let Some(value) = convert_to_canonical(unit, kind, raw) else {
@@ -260,7 +333,13 @@ fn fold_quantity(
             .unconvertible
             .entry((ty.to_owned(), unit.to_owned()))
             .or_insert(0) += 1;
-        quarantine(stats, ty, "unconvertible-unit", rec, start.date_naive());
+        quarantine(
+            stats,
+            ty,
+            QuarantineReason::UnconvertibleUnit,
+            rec,
+            start.date_naive(),
+        );
         return;
     };
     let Some(agg) = daily_agg(kind) else {
@@ -290,7 +369,7 @@ fn fold_sleep(
         quarantine(
             stats,
             stage_value,
-            "unknown-sleep-stage",
+            QuarantineReason::UnknownSleepStage,
             rec,
             start.date_naive(),
         );
@@ -319,7 +398,7 @@ fn fold_sleep(
 fn quarantine(
     stats: &mut ImportStats,
     name: &str,
-    reason: &str,
+    reason: QuarantineReason,
     rec: &RawRecord<'_>,
     date: NaiveDate,
 ) {
@@ -336,7 +415,7 @@ fn quarantine(
 
 #[cfg(test)]
 mod tests {
-    use super::{ImportStats, parse_into, parse_into_buf};
+    use super::{ImportStats, QuarantineReason, parse_into, parse_into_buf};
     use crate::{
         entities::daily_metric::MetricKind,
         services::apple_health::accumulate::{Accumulator, PendingRow},
@@ -843,6 +922,36 @@ mod tests {
             "event buffer reached {} bytes for a {}-byte file — it is not being cleared",
             buf.capacity(),
             xml.len()
+        );
+    }
+
+    /// The spellings are written into `raw_point._import.reason` here and read
+    /// back by the quarantine sweep, so the two directions must agree — and
+    /// only the name-based ones may be swept once a name is curated.
+    #[test]
+    fn quarantine_reasons_round_trip_and_declare_what_the_sweep_may_touch() {
+        for (reason, spelling, name_based) in [
+            (QuarantineReason::UnknownType, "unknown-type", true),
+            (
+                QuarantineReason::UnknownSleepStage,
+                "unknown-sleep-stage",
+                true,
+            ),
+            (QuarantineReason::MissingUnit, "missing-unit", false),
+            (
+                QuarantineReason::UnconvertibleUnit,
+                "unconvertible-unit",
+                false,
+            ),
+        ] {
+            assert_eq!(reason.as_str(), spelling);
+            assert_eq!(QuarantineReason::parse(spelling), Some(reason));
+            assert_eq!(reason.is_name_based(), name_based, "{spelling}");
+        }
+        assert_eq!(
+            QuarantineReason::parse("something-a-future-build-wrote"),
+            None,
+            "an unrecognized reason must not be mistaken for one of ours"
         );
     }
 

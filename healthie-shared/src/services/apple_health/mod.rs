@@ -65,7 +65,7 @@ use sea_orm::{
 use self::{
     accumulate::{Accumulator, PendingRow},
     mapping::{is_recognized_hk_name, map_sleep_stage},
-    parse::ImportStats,
+    parse::{ImportStats, QuarantineReason},
 };
 use crate::{
     clock,
@@ -486,7 +486,7 @@ pub async fn persist_import<C: ConnectionTrait + TransactionTrait>(
     // rows because they are "missing" from it is not, since most of the export
     // may simply not be there.
     let replace_range_refused_truncated = options.replace_range && !stats.document_closed;
-    let stale_rows_deleted = if options.replace_range && !replace_range_refused_truncated {
+    let stale_rows_deleted = if options.replace_range && stats.document_closed {
         delete_stale_rows(&txn, &stale).await?
     } else {
         0
@@ -606,21 +606,30 @@ async fn find_stale_rows<C: ConnectionTrait>(
     let written: HashSet<(MetricKind, NaiveDate)> =
         produced.iter().map(|r| (r.kind, r.date)).collect();
 
-    Ok(daily_metric::Entity::find()
+    // Three columns rather than whole models: a decade's worth of rows for
+    // twenty-odd kinds is fetched here, and `value`/`min`/`max`/`source` and
+    // both timestamps are read by nothing below.
+    let candidates: Vec<(MetricKind, NaiveDate, i32)> = daily_metric::Entity::find()
         // The global range only narrows what the database returns; each row is
         // then held to its own kind's range below.
         .filter(daily_metric::Column::Kind.is_in(kinds))
         .filter(daily_metric::Column::Date.between(from, to))
+        .select_only()
+        .column(daily_metric::Column::Kind)
+        .column(daily_metric::Column::Date)
+        .column(daily_metric::Column::Id)
+        .into_tuple()
         .all(db)
-        .await?
+        .await?;
+
+    Ok(candidates
         .into_iter()
-        .filter(|row| {
+        .filter(|(kind, date, _)| {
             ranges
-                .get(&row.kind)
-                .is_some_and(|(lo, hi)| row.date >= *lo && row.date <= *hi)
-                && !written.contains(&(row.kind, row.date))
+                .get(kind)
+                .is_some_and(|(lo, hi)| date >= lo && date <= hi)
+                && !written.contains(&(*kind, *date))
         })
-        .map(|row| (row.kind, row.date, row.id))
         .collect())
 }
 
@@ -703,24 +712,16 @@ impl OverlapAcc {
 }
 
 async fn load_sleep_totals<C: ConnectionTrait>(db: &C) -> DomainResult<BTreeMap<NaiveDate, f64>> {
-    Ok(daily_metric::Entity::find()
+    let rows: Vec<(NaiveDate, f64)> = daily_metric::Entity::find()
         .filter(daily_metric::Column::Kind.eq(MetricKind::SleepTotal))
+        .select_only()
+        .column(daily_metric::Column::Date)
+        .column(daily_metric::Column::Value)
+        .into_tuple()
         .all(db)
-        .await?
-        .into_iter()
-        .map(|row| (row.date, row.value))
-        .collect())
+        .await?;
+    Ok(rows.into_iter().collect())
 }
-
-/// Reasons that describe an unrecognized *name*, and so stop applying the
-/// moment that name joins the vocabulary.
-///
-/// Deliberately not every reason: a curated metric can also be quarantined
-/// because one record carried an unconvertible or missing unit, and those rows
-/// describe a live data problem that promoting the name does nothing about.
-/// Sweeping them would erase a standing complaint just because the metric
-/// happens to be curated.
-const NAME_BASED_QUARANTINE_REASONS: &[&str] = &["unknown-type", "unknown-sleep-stage"];
 
 /// Delete quarantine rows for `export.xml` names this build now handles.
 ///
@@ -779,13 +780,17 @@ async fn drop_other_dates<C: ConnectionTrait>(
 /// Whether a quarantine row exists because its *name* was unrecognized.
 ///
 /// A row with no recorded reason predates the reason field and can only have
-/// come from an unrecognized name, so it is sweepable.
+/// come from an unrecognized name, so it is sweepable. A reason this build does
+/// not recognize is not: it was written by some other build whose intent we
+/// cannot read, and sweeping it would be a guess.
 fn quarantined_for_its_name(raw_point: &serde_json::Value) -> bool {
     raw_point
         .get("_import")
         .and_then(|meta| meta.get("reason"))
         .and_then(serde_json::Value::as_str)
-        .is_none_or(|reason| NAME_BASED_QUARANTINE_REASONS.contains(&reason))
+        .is_none_or(|reason| {
+            QuarantineReason::parse(reason).is_some_and(QuarantineReason::is_name_based)
+        })
 }
 
 /// Fraction of a comparison that may land on bit-identical values before we

@@ -14,8 +14,8 @@
 //! # Memory
 //!
 //! Quantity retention is `O(kinds × days)` — one small [`Acc`] per
-//! `(kind, date)`, never the readings themselves. For a decade that is ~19
-//! kinds × ~4,500 days ≈ 85k entries.
+//! `(kind, date)`, never the readings themselves. For a decade that is 22
+//! non-sleep kinds × ~4,500 days ≈ 100k entries.
 //!
 //! Sleep is different and the bound is weaker, so state it honestly: sleep
 //! retains *intervals*, coalesced on insert, so retention is `O(stages ×
