@@ -1014,7 +1014,11 @@ mod tests {
             .map(|r| (r.kind, r.value, r.min, r.max))
             .collect();
         actual.sort_by_key(|a| a.0);
-        let weight = 220.462_262_184_877_6;
+        // 100 kg in pounds. Exactly `100 / 0.45359237` as rounded to f64 —
+        // which is what UCUM returns; the hand-derived factor this replaced
+        // was one ULP high, having rounded once on the factor and again on
+        // the multiply.
+        let weight = 220.462_262_184_877_57;
         let expected = [
             // Weight is AvgMinMax, so a lone reading is its own spread.
             (MetricKind::Weight, weight, Some(weight), Some(weight)),
@@ -1024,10 +1028,21 @@ mod tests {
         ];
         let mut expected = expected.to_vec();
         expected.sort_by_key(|a| a.0);
+        // Compared with a tolerance, like `value` beside it: this test is about
+        // a re-run producing the SAME numbers, not about bit-exactness of a
+        // converted float, which no conversion path ever promised.
+        let spread_close = |a: Option<f64>, b: Option<f64>| match (a, b) {
+            (Some(x), Some(y)) => close(x, y),
+            (None, None) => true,
+            _ => false,
+        };
         for ((kind, value, min, max), (ek, ev, emin, emax)) in actual.iter().zip(&expected) {
             assert_eq!(kind, ek);
             assert!(close(*value, *ev), "{kind:?}: {value} != {ev}");
-            assert_eq!((*min, *max), (*emin, *emax), "{kind:?} spread");
+            assert!(
+                spread_close(*min, *emin) && spread_close(*max, *emax),
+                "{kind:?} spread: ({min:?}, {max:?}) != ({emin:?}, {emax:?})"
+            );
         }
     }
 

@@ -157,9 +157,40 @@ be converted is quarantined verbatim, never coerced. Writing `78` kg into a
 column that means pounds produces a plausible number no later reader can detect
 as wrong.
 
+**UCUM is the canonical unit vocabulary** (`ucum-units`), which closes bead
+healthie-c4x's trigger: "revisit when unit conversions become real". The
+arithmetic comes from the standard's own machine-readable `ucum-essence.xml`,
+parsed at build time into generated tables, so no physical constant in this
+codebase is transcribed by hand. One runtime dependency (`thiserror`, already
+present); the XML parsing is build-time only, keeping the aarch64 cross-compile
+target unaffected.
+
+The first implementation hand-derived roughly twenty constants, and replacing
+them was not a formality — it was checked. Two other units crates were measured
+against that table first and **both were less accurate**: one truncates the
+international pound to seven significant figures, the other hardcodes 1609 m per
+mile in its speed module (while getting it right in its length module) and uses
+the International Steam Table calorie where food energy wants the thermochemical
+one. Both were declined on that evidence. UCUM agrees with the hand-derived
+table on all twenty conversions — thirteen bit-exact, seven differing only in
+the last ULP — and on the one case where they differed measurably (100 kg in
+pounds), **UCUM is the correct one**: the hand-derived factor had rounded twice,
+once on the factor and again on the multiply, landing one ULP high.
+
+What UCUM deliberately does **not** own is the vocabulary. Apple and HAE write
+`mL/min·kg`, `lbs`, `mph` and `mmHg` — the last of which is not valid UCUM at
+all (the code is `mm[Hg]`). Mapping those spellings onto codes stays ours,
+because it describes two vendors' habits rather than physics, and the canonical
+side is derived through that same map so a unit and its code cannot drift apart.
+
 Apple's `Cal` (the kilocalorie) is resolved before case folding, because a
 lowercase `cal` is conventionally the small calorie — a 1000x difference. The
 ambiguous spelling is refused rather than guessed at.
+
+Having real dimensions also sharpens the refusal: `is_comparable` distinguishes
+a unit we have never heard of from one we know that measures the wrong thing, so
+`kg` on a distance metric is now rejected as incomparable rather than merely
+unmatched.
 
 **Percent is the one unit where matching strings mean different scales.** Apple
 writes `%` for HealthKit's `HKUnit.percent()`, which is a **0-1 fraction**;

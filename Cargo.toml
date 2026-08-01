@@ -32,6 +32,11 @@ clap = { version = "4", features = ["derive", "env"] }
 # features are empty; `memchr` is its only mandatory dep (pure Rust, no build
 # script), which keeps the aarch64 cross-compile job happy.
 quick-xml = "0.41"
+# UCUM unit conversion (healthie-c4x). Constants are generated at build time
+# from the vendored `ucum-essence.xml` — the standard's own machine-readable
+# table — rather than transcribed by hand. One runtime dep (thiserror, already
+# in our tree); roxmltree is build-time only. NOTE the lib is named `ucum`.
+ucum-units = "0.1"
 sqlx = { version = "0.8", default-features = false, features = ["sqlite"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
