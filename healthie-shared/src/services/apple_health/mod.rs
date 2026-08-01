@@ -197,6 +197,18 @@ const MATERIAL_SHIFT_RATIO: f64 = 0.5;
 /// change a constant.
 const MATERIAL_SHIFT_HOURS: f64 = 0.25;
 
+/// …and the comparison must rest on at least this many nights.
+///
+/// Both thresholds above are about the *size* of a difference and say nothing
+/// about the size of the sample, so without this a single comparable night whose
+/// value happens to sit closer to its neighbor than to itself produces a
+/// confident `Mismatch` — an instruction to change a constant and re-import a
+/// decade of history, derived from n=1. A genuine boundary error is systematic
+/// and shows up across every overlapping night, so requiring two weeks of them
+/// costs nothing real and is the difference between "fires on noise" being a
+/// claim and being true.
+const MIN_COMPARABLE_NIGHTS: usize = 14;
+
 /// What the day-shift comparison concluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SleepDayVerdict {
@@ -241,19 +253,26 @@ impl SleepDayShift {
     ///
     /// Deliberately conservative. This warning tells the operator to change a
     /// constant and re-import a decade of history, so it fires only when a
-    /// neighboring day fits both proportionally and absolutely better — never
-    /// on a tie, never on noise, and never against this import's own output.
+    /// neighboring day fits both proportionally and absolutely better, across
+    /// at least [`MIN_COMPARABLE_NIGHTS`] nights — never on a tie, never on too
+    /// small a sample, and never against this import's own output.
     #[must_use]
     pub fn verdict(&self) -> SleepDayVerdict {
         let Self::Compared {
+            compared_days,
             prev_day,
             same_day,
             next_day,
-            ..
         } = *self
         else {
             return SleepDayVerdict::Unverified;
         };
+        // A handful of overlapping nights cannot distinguish a systematic
+        // one-day offset from ordinary night-to-night variation, and this
+        // verdict is too expensive to act on to be drawn from noise.
+        if compared_days < MIN_COMPARABLE_NIGHTS {
+            return SleepDayVerdict::Unverified;
+        }
         let means = [prev_day, same_day, next_day];
         let best = best_index(means);
         if best == 1 {
@@ -875,8 +894,8 @@ mod tests {
     use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, EntityTrait};
 
     use super::{
-        ImportOptions, ImportReport, SleepDayShift, SleepDayVerdict, parse_export_reader,
-        persist_import, survey_existing,
+        ImportOptions, ImportReport, MIN_COMPARABLE_NIGHTS, SleepDayShift, SleepDayVerdict,
+        parse_export_reader, persist_import, survey_existing,
     };
     use crate::{
         entities::{daily_metric, daily_metric::MetricKind, quarantined_metric},
@@ -1170,27 +1189,43 @@ mod tests {
         assert_eq!(report.sleep_day_shift.best_offset(), None);
     }
 
-    /// If the sleep-day boundary disagreed with whatever wrote the existing
-    /// rows, every backfilled night would sit one day off — invisible to every
-    /// other check, since a shifted row's value looks perfectly normal.
-    #[tokio::test]
-    async fn sleep_day_shift_detects_an_offset_night() {
+    /// Seed `nights` consecutive nights of existing `SleepTotal` rows starting
+    /// at `2026-06-01`, each carrying `slept` hours, and import the same nights
+    /// as segments shifted one day LATER than the rows describe. Returns the
+    /// resulting shift.
+    ///
+    /// The seeded value is deliberately not a round number: an independently
+    /// computed rollup never matches a reconstruction bit-for-bit, and exact
+    /// equality is what flags a self-comparison.
+    async fn shifted_import(nights: usize) -> SleepDayShift {
+        use std::fmt::Write as _;
+
+        /// Length of night `n`, in whole minutes: 4h30, 5h00, 5h30, 6h00, 6h30,
+        /// repeating. Nights must DIFFER from one another or a one-day shift is
+        /// undetectable in principle — with a constant series every offset fits
+        /// equally well and the comparison correctly reports a tie. Minutes
+        /// rather than fractional hours so the fixture carries no rounding.
+        fn night_minutes(n: usize) -> i32 {
+            270 + i32::try_from(n % 5).expect("0..5 fits i32") * 30
+        }
+
         let db = test_db().await;
         let now = datetime("2026-07-30 08:00:00");
-        // Existing rows carrying our night's ~6 hours one day EARLIER, plus
-        // unrelated neighbors so the comparison has something to reject. The
-        // 5.97 is deliberately NOT 6.0: an independently-computed rollup never
-        // matches a reconstruction bit-for-bit, and exact equality is what
-        // flags a self-comparison.
-        for (day, hours) in [
-            ("2026-07-27", 5.97),
-            ("2026-07-28", 1.2),
-            ("2026-07-29", 1.1),
-        ] {
+        let start = date("2026-06-01");
+        // Existing rows hold night N's hours on day N. The import files the
+        // same night under N+1, so the stored series is ours shifted one day
+        // earlier — exactly the failure this check exists to catch. Seeded one
+        // day past the last night so every imported row has stored rows at
+        // D-1, D and D+1; the comparison skips any night that doesn't.
+        let mut day = start;
+        for i in 0..=(nights + 1) {
             daily_metric::ActiveModel {
                 kind: Set(MetricKind::SleepTotal),
-                date: Set(date(day)),
-                value: Set(hours),
+                date: Set(day),
+                // Not bit-identical to what we reconstruct: an independently
+                // computed rollup never matches to the last bit, and exact
+                // equality is what flags a self-comparison.
+                value: Set(f64::from(night_minutes(i)) / 60.0 - 0.03),
                 created_at: Set(now),
                 updated_at: Set(now),
                 ..Default::default()
@@ -1198,31 +1233,71 @@ mod tests {
             .insert(&db)
             .await
             .expect("seed");
+            day = day.succ_opt().expect("in range");
         }
 
-        let report = import(
-            &db,
-            r#"<HealthData>
-              <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Watch"
-                      value="HKCategoryValueSleepAnalysisAsleepCore"
-                      startDate="2026-07-27 23:00:00 -0700" endDate="2026-07-28 05:00:00 -0700"/>
-            </HealthData>"#,
-        )
-        .await;
+        let mut xml = String::from("<HealthData>");
+        let mut night = start;
+        for i in 0..nights {
+            // Starts at 23:00, so the 18:00 boundary files it under the
+            // following day — one later than the row holding those hours. Ends
+            // `night_minutes(i)` after 23:00, i.e. that less an hour past
+            // midnight.
+            let end = night_minutes(i) - 60;
+            let woke = night.succ_opt().expect("in range");
+            write!(
+                xml,
+                r#"<Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Watch"
+                     value="HKCategoryValueSleepAnalysisAsleepCore"
+                     startDate="{night} 23:00:00 -0700" endDate="{woke} {:02}:{:02}:00 -0700"/>"#,
+                end / 60,
+                end % 60,
+            )
+            .expect("writing to a String cannot fail");
+            night = woke;
+        }
+        xml.push_str("</HealthData>");
+        import(&db, &xml).await.sleep_day_shift
+    }
 
-        let SleepDayShift::Compared { compared_days, .. } = report.sleep_day_shift else {
-            panic!("expected a comparison, got {:?}", report.sleep_day_shift);
+    /// If the sleep-day boundary disagreed with whatever wrote the existing
+    /// rows, every backfilled night would sit one day off — invisible to every
+    /// other check, since a shifted row's value looks perfectly normal.
+    #[tokio::test]
+    async fn sleep_day_shift_detects_an_offset_across_enough_nights() {
+        let shift = shifted_import(MIN_COMPARABLE_NIGHTS).await;
+        let SleepDayShift::Compared { compared_days, .. } = shift else {
+            panic!("expected a comparison, got {shift:?}");
         };
-        assert_eq!(compared_days, 1);
+        assert!(compared_days >= MIN_COMPARABLE_NIGHTS);
+        assert_eq!(shift.best_offset(), Some(-1));
+        assert_eq!(shift.verdict(), SleepDayVerdict::Mismatch { offset: -1 });
+    }
+
+    /// The same shift, on too few nights, must NOT produce a verdict.
+    ///
+    /// This warning tells the operator to change a constant and re-import a
+    /// decade of history. A handful of nights cannot distinguish a systematic
+    /// one-day offset from ordinary night-to-night variation, and `best_offset`
+    /// still reports what fits best — it is only the *verdict* that withholds
+    /// judgment. Before this, a single comparable night whose value happened to
+    /// sit nearer its neighbor produced a confident `Mismatch` from n=1.
+    #[tokio::test]
+    async fn sleep_day_shift_withholds_a_verdict_on_too_few_nights() {
+        let shift = shifted_import(2).await;
+        let SleepDayShift::Compared { compared_days, .. } = shift else {
+            panic!("expected a comparison, got {shift:?}");
+        };
+        assert!(compared_days < MIN_COMPARABLE_NIGHTS);
         assert_eq!(
-            report.sleep_day_shift.best_offset(),
+            shift.best_offset(),
             Some(-1),
-            "our 2026-07-28 row matches the existing 2026-07-27 row: {:?}",
-            report.sleep_day_shift
+            "the offset that fits best is still reported"
         );
         assert_eq!(
-            report.sleep_day_shift.verdict(),
-            SleepDayVerdict::Mismatch { offset: -1 }
+            shift.verdict(),
+            SleepDayVerdict::Unverified,
+            "but too small a sample must not instruct a decade-wide re-import"
         );
     }
 

@@ -294,6 +294,17 @@ cover wildly different spans: a decade of heart rate beside two weigh-ins would
 stretch the weight window across the whole decade and sweep in every weigh-in
 the live push landed in between.
 
+**Known limit, stated rather than implied:** scoping to kinds the run _produced_
+means a re-map that stops producing a kind **entirely** leaves that kind's rows
+unreported and beyond `--replace-range`'s reach — the one re-mapping case named
+above that this does not actually cover. Correcting a mapping so
+`HKQuantityTypeIdentifierWalkingSpeed` lands on `StepLength` leaves a decade of
+`WalkingSpeed` rows untouched and unmentioned. Widening the query to every kind
+in the range is not obviously right either, since a kind absent from this export
+is equally consistent with "no longer mapped" and "this export does not cover
+it" — the same undecidability as the provenance question above, and the reason
+this is filed (healthie-c3y) rather than fixed here.
+
 Even per kind this is a **heuristic, and the report says so**. `daily_metric`
 records no provenance (healthie-1ru), so a row this import did not write is
 equally consistent with an earlier import misplacing it and with the live HAE
