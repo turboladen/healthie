@@ -51,6 +51,20 @@ pub fn render(report: &ImportReport, path: &Path) -> String {
         );
     }
 
+    if !report.document_closed {
+        // Worth saying even when nothing destructive was asked for: the counts
+        // above describe a partial file, and look entirely ordinary.
+        for line in [
+            "",
+            "  ⚠  THE EXPORT ENDED WITH ITS ROOT ELEMENT STILL OPEN — IT IS TRUNCATED.",
+            "     An interrupted transfer of a multi-gigabyte export cut at a record boundary",
+            "     parses without error and simply stops early. Everything it held was imported,",
+            "     but treat the counts above as a lower bound and re-transfer the file.",
+        ] {
+            let _ = writeln!(out, "{line}");
+        }
+    }
+
     render_quarantine(&mut out, report);
     render_unconvertible(&mut out, report);
     render_kinds(&mut out, report);
@@ -67,28 +81,44 @@ fn render_stale_rows(out: &mut String, report: &ImportReport) {
         return;
     }
     let total: usize = report.stale_rows.iter().map(|s| s.count).sum();
-    if report.stale_rows_deleted > 0 {
-        let _ = writeln!(
-            out,
-            "\n  replaced range       deleted {} pre-existing rows this run did not rewrite",
+    // Line by line so rustfmt cannot rewrap these differently on successive runs.
+    let preamble: &[&str] = if report.stale_rows_deleted > 0 {
+        &[
+            "     These rows are GONE. If any of them were live-push data rather than an",
+            "     earlier import's misplacement, restore them from your backup — nothing",
+            "     here recorded which they were. Deleted, by kind:",
+        ]
+    } else if report.replace_range_refused_truncated {
+        &[
+            "     --replace-range was REFUSED: the export ended with its root element still",
+            "     open, so it is truncated. Rows missing from a partial file are mostly rows",
+            "     the file does not reach, not rows an earlier import misplaced. Re-transfer",
+            "     the export and try again. Nothing was deleted.",
+        ]
+    } else {
+        &[
+            "     Either an earlier import placed them with a different sleep-day boundary or",
+            "     metric mapping — in which case they hold known-wrong values that upsert alone",
+            "     can never remove — OR they are days this export does not cover: the live HAE",
+            "     push landed them, every reading of that kind hit an unconvertible unit, or",
+            "     you deleted them in the Health app. Nothing records which.",
+            "     --replace-range DELETES them. Check some of the dates below before using it.",
+        ]
+    };
+    let heading = if report.stale_rows_deleted > 0 {
+        format!(
+            "\n  ⚠  DELETED {} PRE-EXISTING ROWS THIS RUN DID NOT REWRITE",
             report.stale_rows_deleted
-        );
-        return;
-    }
-    let _ = writeln!(
-        out,
-        "\n  ⚠  {total} PRE-EXISTING ROWS IN THE IMPORTED RANGE WERE NOT REWRITTEN"
-    );
-    // Line by line so rustfmt cannot rewrap it differently on successive runs.
-    for line in [
-        "     Either an earlier import placed them with a different sleep-day boundary or",
-        "     metric mapping — in which case they hold known-wrong values that upsert alone",
-        "     can never remove — OR they came from the live HAE push on days this export",
-        "     does not cover, in which case they are good data. Nothing records which.",
-        "     --replace-range DELETES them. Check some of the dates below before using it.",
-    ] {
+        )
+    } else {
+        format!("\n  ⚠  {total} PRE-EXISTING ROWS IN THE IMPORTED RANGE WERE NOT REWRITTEN")
+    };
+    let _ = writeln!(out, "{heading}");
+    for line in preamble {
         let _ = writeln!(out, "{line}");
     }
+    // Enumerated in every case, deletion included: an irreversible removal of
+    // health data must leave more of a record than a bare count.
     for stale in &report.stale_rows {
         let dates: Vec<String> = stale
             .sample_dates
@@ -232,12 +262,20 @@ fn render_sleep_shift(out: &mut String, report: &ImportReport) {
         SleepDayShift::SelfComparison { compared_days } => {
             // Saying "agrees" here would retire the one question this import
             // cannot otherwise answer, on the strength of reading itself back.
-            let _ = writeln!(
-                out,
-                "\n  sleep day boundary   compared against this import's OWN earlier output over \
-                 {compared_days} days — NOT independently verified.\n                       Only \
-                 the first import into a store holding live HAE rows can check this."
-            );
+            for line in [
+                format!(
+                    "\n  sleep day boundary   values are bit-identical across {compared_days} \
+                     days, so this is almost"
+                ),
+                "                       certainly this import's own earlier output — NOT \
+                 independently"
+                    .to_owned(),
+                "                       verified. Only the first import into a store holding live"
+                    .to_owned(),
+                "                       HAE rows can check this.".to_owned(),
+            ] {
+                let _ = writeln!(out, "{line}");
+            }
             return;
         }
         SleepDayShift::Compared {
@@ -311,6 +349,8 @@ mod tests {
             sleep_day_shift: SleepDayShift::NoComparableRows,
             stale_rows: Vec::new(),
             stale_rows_deleted: 0,
+            document_closed: true,
+            replace_range_refused_truncated: false,
         }
     }
 
@@ -424,8 +464,10 @@ mod tests {
             compared_days: 4_000,
         };
         let out = render(&report, Path::new("export.xml"));
-        assert!(out.contains("OWN earlier output"), "{out}");
-        assert!(out.contains("NOT independently verified"), "{out}");
+        assert!(out.contains("own earlier output"), "{out}");
+        assert!(out.contains("NOT independently"), "{out}");
+        // Hedged, not asserted: bit-identity is overwhelming evidence, not proof.
+        assert!(out.contains("almost"), "{out}");
         assert!(!out.contains("agrees"), "{out}");
         assert!(!out.contains("MISMATCH"), "{out}");
     }
@@ -447,18 +489,52 @@ mod tests {
         assert!(out.contains("2019-04-02"), "{out}");
     }
 
+    /// An irreversible deletion of health data must leave more of a record than
+    /// a bare count — which kinds, and which dates, so the operator can find
+    /// them in a backup.
     #[test]
-    fn deleted_stale_rows_are_reported_as_deleted() {
+    fn deleted_stale_rows_keep_their_per_kind_detail() {
         let mut report = base();
         report.stale_rows = vec![StaleRows {
             kind: MetricKind::SleepTotal,
             count: 312,
-            sample_dates: vec![date("2019-04-02")],
+            sample_dates: vec![date("2019-04-02"), date("2019-06-11")],
         }];
         report.stale_rows_deleted = 312;
         let out = render(&report, Path::new("export.xml"));
-        assert!(out.contains("deleted 312"), "{out}");
-        assert!(!out.contains("NOT REWRITTEN"), "already dealt with:\n{out}");
+        assert!(out.contains("DELETED 312"), "{out}");
+        assert!(out.contains("SleepTotal"), "kinds must survive:\n{out}");
+        assert!(out.contains("2019-04-02"), "dates must survive:\n{out}");
+        assert!(out.contains("backup"), "{out}");
+    }
+
+    /// Deleting on the strength of a truncated file would remove rows the file
+    /// merely never reached.
+    #[test]
+    fn refused_replace_range_says_why_and_confirms_nothing_was_deleted() {
+        let mut report = base();
+        report.document_closed = false;
+        report.replace_range_refused_truncated = true;
+        report.stale_rows = vec![StaleRows {
+            kind: MetricKind::SleepTotal,
+            count: 4,
+            sample_dates: vec![date("2019-04-02")],
+        }];
+        let out = render(&report, Path::new("export.xml"));
+        assert!(out.contains("REFUSED"), "{out}");
+        assert!(out.contains("truncated"), "{out}");
+        assert!(out.contains("Nothing was deleted"), "{out}");
+    }
+
+    /// Truncation is worth saying even when nothing destructive was asked for:
+    /// the counts describe a partial file and look entirely ordinary.
+    #[test]
+    fn truncated_export_is_reported_even_without_replace_range() {
+        let mut report = base();
+        report.document_closed = false;
+        let out = render(&report, Path::new("export.xml"));
+        assert!(out.contains("TRUNCATED"), "{out}");
+        assert!(out.contains("lower bound"), "{out}");
     }
 
     /// `HealthKit` stores percentages as a 0-1 fraction, so this is the

@@ -351,19 +351,38 @@ impl Acc {
 /// Running sleep fold for one night.
 #[derive(Debug, Default)]
 struct SleepAcc {
-    stages: BTreeMap<MetricKind, IntervalSet>,
+    stages: BTreeMap<MetricKind, StageAcc>,
     /// Union of every asleep-class segment, whatever its stage — Apple emits no
     /// total, so `SleepTotal` is derived from this.
-    asleep: IntervalSet,
+    asleep: StageAcc,
+}
+
+/// One sleep sub-metric's intervals and the device credited for them.
+///
+/// Source is tracked per stage rather than once per night because each stage
+/// becomes its own row: crediting them all to whichever segment happened to be
+/// latest would name, on a `SleepCore` row, a bed sensor that only ever
+/// reported `InBed` — the same misattribution the Sum path goes to trouble to
+/// avoid, and the reason `SleepTotal` counts only asleep-class segments.
+#[derive(Debug, Default)]
+struct StageAcc {
+    set: IntervalSet,
     source: Option<String>,
     last_ts: Option<DateTime<FixedOffset>>,
-    /// Source credited on the derived `SleepTotal` row, tracked separately
-    /// because it must come from a device that contributed *asleep* time.
-    /// `InBed` and `Awake` segments feed no sleep total, so crediting one of
-    /// their devices would name a source that contributed nothing to the value
-    /// — the same misattribution the Sum path goes to trouble to avoid.
-    asleep_source: Option<String>,
-    asleep_last_ts: Option<DateTime<FixedOffset>>,
+}
+
+impl StageAcc {
+    /// Fold in one segment, taking its source if it supersedes the current one.
+    fn insert(&mut self, start: DateTime<FixedOffset>, interval: Interval, source: Option<&str>) {
+        if self
+            .last_ts
+            .is_none_or(|prev| supersedes_source(start, source, prev, self.source.as_deref()))
+        {
+            self.last_ts = Some(start);
+            self.source = source.map(str::to_owned);
+        }
+        self.set.insert(interval);
+    }
 }
 
 /// One resolved `daily_metric` row, ready to persist.
@@ -449,31 +468,18 @@ impl Accumulator {
         let date = sleep_date(start);
         let night = self.sleep.entry(date).or_default();
 
-        if night
-            .last_ts
-            .is_none_or(|prev| supersedes_source(start, source, prev, night.source.as_deref()))
-        {
-            night.last_ts = Some(start);
-            night.source = source.map(str::to_owned);
-        }
         if counts_as_asleep {
-            if night.asleep_last_ts.is_none_or(|prev| {
-                supersedes_source(start, source, prev, night.asleep_source.as_deref())
-            }) {
-                night.asleep_last_ts = Some(start);
-                night.asleep_source = source.map(str::to_owned);
-            }
-            night.asleep.insert(interval);
+            night.asleep.insert(start, interval, source);
             // Checked explicitly: undifferentiated legacy segments carry no
             // stage, so this union is the ONLY set they grow. Omitting it would
             // leave the one input that can break the memory profile unwatched
             // for exactly the oldest years of history.
-            warn_if_degenerate(&mut night.asleep, date, None, source);
+            warn_if_degenerate(&mut night.asleep.set, date, None, source);
         }
         if let Some(stage) = stage {
-            let set = night.stages.entry(stage).or_default();
-            set.insert(interval);
-            warn_if_degenerate(set, date, Some(stage), source);
+            let acc = night.stages.entry(stage).or_default();
+            acc.insert(start, interval, source);
+            warn_if_degenerate(&mut acc.set, date, Some(stage), source);
         }
     }
 
@@ -488,8 +494,8 @@ impl Accumulator {
                 night
                     .stages
                     .values()
-                    .map(IntervalSet::len)
-                    .chain(std::iter::once(night.asleep.len()))
+                    .map(|acc| acc.set.len())
+                    .chain(std::iter::once(night.asleep.set.len()))
             })
             .max()
             .unwrap_or(0)
@@ -528,17 +534,22 @@ impl Accumulator {
         }
 
         for (date, night) in &self.sleep {
-            for (stage, set) in &night.stages {
-                if !set.is_empty() {
-                    rows.push(sleep_row(*stage, *date, set.hours(), night.source.clone()));
+            for (stage, acc) in &night.stages {
+                if !acc.set.is_empty() {
+                    rows.push(sleep_row(
+                        *stage,
+                        *date,
+                        acc.set.hours(),
+                        acc.source.clone(),
+                    ));
                 }
             }
-            if !night.asleep.is_empty() {
+            if !night.asleep.set.is_empty() {
                 rows.push(sleep_row(
                     MetricKind::SleepTotal,
                     *date,
-                    night.asleep.hours(),
-                    night.asleep_source.clone(),
+                    night.asleep.set.hours(),
+                    night.asleep.source.clone(),
                 ));
             }
         }
@@ -1091,6 +1102,17 @@ mod tests {
         );
         assert_eq!(
             row_for(&rows, MetricKind::TimeInBed).source.as_deref(),
+            Some("Bed")
+        );
+        // Every stage is its own row, so every stage needs its own source: the
+        // Bed sensor's later Awake segment must not be credited on SleepCore.
+        assert_eq!(
+            row_for(&rows, MetricKind::SleepCore).source.as_deref(),
+            Some("Watch"),
+            "the bed sensor contributed no core sleep and must not be credited"
+        );
+        assert_eq!(
+            row_for(&rows, MetricKind::SleepAwake).source.as_deref(),
             Some("Bed")
         );
     }

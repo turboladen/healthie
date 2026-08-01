@@ -319,6 +319,16 @@ pub struct ImportReport {
     /// How many of those were deleted (non-zero only with
     /// [`ImportOptions::replace_range`]).
     pub stale_rows_deleted: usize,
+    /// Whether the export closed every element it opened.
+    ///
+    /// `false` means the file ended early — an interrupted transfer of a
+    /// multi-gigabyte export cut at a record boundary looks well-formed and
+    /// parses without error. Whatever it held has still been imported.
+    pub document_closed: bool,
+    /// `--replace-range` was asked for and refused because the export was
+    /// truncated. Rows that look stale against a partial file are mostly rows
+    /// the file simply does not reach.
+    pub replace_range_refused_truncated: bool,
 }
 
 /// Parse an `export.xml` from disk. Synchronous and database-free.
@@ -417,7 +427,12 @@ pub async fn persist_import<C: ConnectionTrait + TransactionTrait>(
         Some(range) => find_stale_rows(&txn, &resolved.rows, range).await?,
         None => Vec::new(),
     };
-    let stale_rows_deleted = if options.replace_range && !stale.is_empty() {
+    // A file truncated mid-transfer parses cleanly if the cut fell on a record
+    // boundary — it just stops early. Importing what it holds is fine; deleting
+    // rows because they are "missing" from it is not, since most of the export
+    // may simply not be there.
+    let replace_range_refused_truncated = options.replace_range && !stats.document_closed;
+    let stale_rows_deleted = if options.replace_range && !replace_range_refused_truncated {
         delete_stale_rows(&txn, &stale).await?
     } else {
         0
@@ -476,6 +491,8 @@ pub async fn persist_import<C: ConnectionTrait + TransactionTrait>(
         sleep_day_shift,
         stale_rows: summarize_stale(&stale),
         stale_rows_deleted,
+        document_closed: stats.document_closed,
+        replace_range_refused_truncated,
     })
 }
 
@@ -553,17 +570,33 @@ async fn find_stale_rows<C: ConnectionTrait>(
         .collect())
 }
 
+/// Bound on ids per `IN (…)` statement.
+///
+/// `SQLITE_MAX_VARIABLE_NUMBER` defaults to 32766; a decade of orphaned rows
+/// can exceed that, and the statement would fail. It fails *safe* — the
+/// transaction rolls back — but that would make the flag unusable on precisely
+/// the case it exists for.
+const DELETE_CHUNK: usize = 1_000;
+
+/// Delete the given rows, returning how many the database reports removing.
+///
+/// The count comes from `rows_affected` rather than the length of the input:
+/// on the one operation here that destroys data, the number shown to the
+/// operator should be what happened, not what was intended.
 async fn delete_stale_rows<C: ConnectionTrait>(
     db: &C,
     stale: &[(MetricKind, NaiveDate, i32)],
 ) -> DomainResult<usize> {
-    let ids: Vec<i32> = stale.iter().map(|(_, _, id)| *id).collect();
-    let deleted = ids.len();
-    daily_metric::Entity::delete_many()
-        .filter(daily_metric::Column::Id.is_in(ids))
-        .exec(db)
-        .await?;
-    Ok(deleted)
+    let mut deleted = 0u64;
+    for chunk in stale.chunks(DELETE_CHUNK) {
+        let ids: Vec<i32> = chunk.iter().map(|(_, _, id)| *id).collect();
+        let result = daily_metric::Entity::delete_many()
+            .filter(daily_metric::Column::Id.is_in(ids))
+            .exec(db)
+            .await?;
+        deleted += result.rows_affected;
+    }
+    Ok(usize::try_from(deleted).unwrap_or(usize::MAX))
 }
 
 fn summarize_stale(stale: &[(MetricKind, NaiveDate, i32)]) -> Vec<StaleRows> {
@@ -657,15 +690,18 @@ async fn clear_promoted_quarantine<C: ConnectionTrait>(db: &C) -> DomainResult<u
         })
         .map(|row| row.id)
         .collect();
-    if stale.is_empty() {
-        return Ok(0);
+    // Bounded by the number of distinct uncurated names (~hundreds), so one
+    // statement would fit — chunked anyway to match `delete_stale_rows`, since
+    // "it happens to be small" is not a property anything enforces.
+    let mut cleared = 0u64;
+    for chunk in stale.chunks(DELETE_CHUNK) {
+        let result = quarantined_metric::Entity::delete_many()
+            .filter(quarantined_metric::Column::Id.is_in(chunk.to_vec()))
+            .exec(db)
+            .await?;
+        cleared += result.rows_affected;
     }
-    let cleared = stale.len();
-    quarantined_metric::Entity::delete_many()
-        .filter(quarantined_metric::Column::Id.is_in(stale))
-        .exec(db)
-        .await?;
-    Ok(cleared)
+    Ok(usize::try_from(cleared).unwrap_or(usize::MAX))
 }
 
 /// Remove any quarantine row for `raw_name` dated other than `keep`.
@@ -703,8 +739,15 @@ fn quarantined_for_its_name(raw_point: &serde_json::Value) -> bool {
 ///
 /// Two independent computations of a night — Apple's own rollup versus an
 /// interval union reconstructed from raw segments — essentially never agree to
-/// the last bit, and never do so across hundreds of days. A preponderance of
-/// exact matches is not agreement; it is a mirror.
+/// the last bit, and essentially never across a majority of days. A
+/// preponderance of exact matches is not agreement; it is almost certainly a
+/// mirror.
+///
+/// Not a proof: live rows that happened to carry this import's nights one day
+/// over, with coinciding values, would also trip it and suppress a real
+/// mismatch. That needs bit-identity across most days and is not achievable
+/// against real HAE figures — and the failure direction is the safe one, since
+/// it withholds a verdict rather than issuing a false green light.
 const SELF_COMPARISON_FRACTION: f64 = 0.5;
 
 /// Mean absolute difference between reconstructed `SleepTotal` values and
@@ -1365,6 +1408,63 @@ mod tests {
                 .any(|r| r.kind == MetricKind::Weight && r.date == date("2026-07-15")),
             "the live weigh-in must survive"
         );
+    }
+
+    /// A transfer cut at a record boundary parses without error and simply
+    /// stops early. Importing what it holds is fine; DELETING rows because they
+    /// are "missing" from it is not — most of the export may not be there.
+    #[tokio::test]
+    async fn replace_range_is_refused_on_a_truncated_export() {
+        let db = test_db().await;
+        let now = datetime("2026-07-30 08:00:00");
+        for day in ["2026-07-10", "2026-07-20"] {
+            daily_metric::ActiveModel {
+                kind: Set(MetricKind::HeartRate),
+                date: Set(date(day)),
+                value: Set(61.0),
+                created_at: Set(now),
+                updated_at: Set(now),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .expect("seed");
+        }
+
+        // Cut at a clean record boundary: no `</HealthData>`.
+        let truncated = r#"<HealthData locale="en_US">
+          <Record type="HKQuantityTypeIdentifierHeartRate" unit="count/min"
+                  startDate="2026-07-01 08:00:00 -0700" endDate="2026-07-01 08:00:00 -0700" value="60"/>
+          <Record type="HKQuantityTypeIdentifierHeartRate" unit="count/min"
+                  startDate="2026-07-28 08:00:00 -0700" endDate="2026-07-28 08:00:00 -0700" value="62"/>"#;
+
+        let report = import_replacing(&db, truncated).await;
+
+        assert!(!report.document_closed, "the fixture is truncated");
+        assert!(report.replace_range_refused_truncated);
+        assert_eq!(report.stale_rows_deleted, 0);
+        assert_eq!(
+            daily_metric::Entity::find()
+                .all(&db)
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| r.kind == MetricKind::HeartRate)
+                .count(),
+            4,
+            "both seeded rows survive alongside the two imported ones"
+        );
+        // The partial data still landed — leniency is only withheld from the
+        // destructive half.
+        assert_eq!(report.records_curated, 2);
+    }
+
+    #[tokio::test]
+    async fn a_complete_export_is_not_flagged_as_truncated() {
+        let db = test_db().await;
+        let report = import(&db, FIXTURE).await;
+        assert!(report.document_closed);
+        assert!(!report.replace_range_refused_truncated);
     }
 
     /// The regression the smoke test caught: re-running must not churn a

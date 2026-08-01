@@ -53,11 +53,21 @@ pub enum Command {
         path: PathBuf,
 
         /// Delete pre-existing rows inside the imported range that this run did
-        /// not produce.
+        /// not produce. BACK UP THE DATABASE FILE FIRST — this is not
+        /// recoverable.
         ///
         /// Use after changing the sleep-day boundary or a metric mapping, when
         /// the previous import's rows are known to be wrong. Deletes real data,
         /// so it is opt-in: run without it first and read the report.
+        ///
+        /// A row can look stale for reasons that have nothing to do with a
+        /// boundary change — days the live HAE push covered but this export
+        /// does not, days where every reading of a kind hit an unconvertible
+        /// unit (so no row was produced), and days deleted in the Health app.
+        /// Nothing distinguishes those from an earlier import's leftovers, so
+        /// read the listed dates before using this.
+        ///
+        /// Refused when the export is truncated.
         #[arg(long)]
         replace_range: bool,
     },

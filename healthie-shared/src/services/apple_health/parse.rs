@@ -66,6 +66,15 @@ pub(crate) struct ImportStats {
     /// `(type, unit)` pairs no conversion covers, with how many records each
     /// affected.
     pub(crate) unconvertible: BTreeMap<(String, String), u64>,
+    /// Whether every element opened was also closed before EOF.
+    ///
+    /// A transfer of a multi-gigabyte export interrupted at a clean record
+    /// boundary produces well-formed-looking XML that parses without error —
+    /// it is simply missing the rest of the file, and the closing
+    /// `</HealthData>`. The import is deliberately lenient about that (a
+    /// partial backfill still lands what it can), but anything *destructive*
+    /// must not act on a file that may be missing most of its records.
+    pub(crate) document_closed: bool,
 }
 
 /// Stream `reader`, folding every `<Record>` into `acc`.
@@ -96,16 +105,30 @@ pub(crate) fn parse_into_buf<R: BufRead>(
     stats: &mut ImportStats,
 ) -> DomainResult<()> {
     let mut xml = Reader::from_reader(reader);
+    // Every element opened must be closed by EOF. quick-xml checks that end
+    // tags *match*, but reaching EOF with the root still open is not an error
+    // to it — which is exactly the shape a truncated transfer produces.
+    let mut depth = 0i64;
     loop {
         match xml.read_event_into(buf) {
             Ok(Event::Eof) => break,
-            Ok(Event::Start(e) | Event::Empty(e)) if e.name().as_ref() == RECORD => {
+            Ok(Event::Start(e)) if e.name().as_ref() == RECORD => {
+                depth += 1;
                 stats.records_read += 1;
                 fold_record(&e, acc, stats);
                 if stats.records_read.is_multiple_of(PROGRESS_EVERY) {
                     tracing::info!(records = stats.records_read, "export.xml parse progress");
                 }
             }
+            Ok(Event::Empty(e)) if e.name().as_ref() == RECORD => {
+                stats.records_read += 1;
+                fold_record(&e, acc, stats);
+                if stats.records_read.is_multiple_of(PROGRESS_EVERY) {
+                    tracing::info!(records = stats.records_read, "export.xml parse progress");
+                }
+            }
+            Ok(Event::Start(_)) => depth += 1,
+            Ok(Event::End(_)) => depth -= 1,
             Ok(_) => {}
             Err(err) => {
                 return Err(DomainError::Internal(format!(
@@ -118,6 +141,7 @@ pub(crate) fn parse_into_buf<R: BufRead>(
         // this the buffer grows to the size of the whole file.
         buf.clear();
     }
+    stats.document_closed = depth == 0;
     Ok(())
 }
 

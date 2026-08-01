@@ -236,9 +236,23 @@ rows one day over and reports a mismatch in the opposite direction, so the
 fix-and-re-run loop the report prescribes would oscillate forever with each run
 confidently contradicting the last. Self-comparison is therefore detected — a
 preponderance of _exactly zero_ differences, which two independent computations
-of a night never produce — and reported as "not independently verified", never as
-agreement. A false green light here would be worse than no check at all, because
-it retires the one question this importer cannot otherwise answer.
+of a night essentially never produce — and reported as "not independently
+verified", never as agreement. A false green light here would be worse than no
+check at all, because it retires the one question this importer cannot otherwise
+answer.
+
+This is a heuristic, not a proof: live rows that happened to carry this import's
+nights one day over, with coinciding values, would trip it and suppress a real
+mismatch. That needs bit-identity across a majority of days and is not achievable
+against real HAE figures, and the failure direction is the safe one — it
+withholds a verdict rather than issuing a false green light.
+
+**Anything destructive additionally requires a complete file.** A transfer of a
+multi-gigabyte export interrupted at a record boundary parses without error and
+simply stops early, so `--replace-range` is refused when EOF arrives with the
+root element still open: rows "missing" from a partial file are mostly rows the
+file does not reach. Importing what a truncated file holds is still allowed, and
+the report says the file was truncated.
 
 The three means also share one denominator (only nights with a stored row at
 `D−1`, `D` and `D+1` are counted). Means taken over different day sets are not
