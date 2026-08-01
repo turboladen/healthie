@@ -63,7 +63,7 @@ pub fn preflight_warning(
     let _ = writeln!(out, "   Back up {db_path} before continuing.");
     let _ = writeln!(
         out,
-        "   Nothing has been read or written yet — Ctrl-C now to abort.\n"
+        "   The export has not been opened and nothing has been written — Ctrl-C to abort.\n"
     );
     Some(out)
 }
