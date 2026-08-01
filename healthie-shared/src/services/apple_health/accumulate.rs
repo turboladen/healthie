@@ -106,7 +106,11 @@ pub(crate) fn daily_agg(kind: MetricKind) -> Option<DailyAgg> {
         | MetricKind::ActiveEnergy
         | MetricKind::ExerciseMinutes
         | MetricKind::StandMinutes
-        | MetricKind::WalkingDistance => DailyAgg::Sum,
+        | MetricKind::WalkingDistance
+        // FlightsClimbed is logged by both the iPhone and the Watch, so it
+        // needs the per-source de-duplication `Sum` carries as much as Steps
+        // does — Steve's real export had Steps doubled on 2,979 days.
+        | MetricKind::FlightsClimbed => DailyAgg::Sum,
 
         // Sampled continuously all day, where the spread is clinically the
         // point — a desaturation dip or an HR spike is invisible in a mean.
@@ -130,6 +134,13 @@ pub(crate) fn daily_agg(kind: MetricKind) -> Option<DailyAgg> {
         // CardioRecovery: mean across the day's workouts, worst/best retained.
         // A widening spread is itself a signal, so it is kept, not collapsed.
         MetricKind::CardioRecovery => DailyAgg::AvgMinMax,
+
+        // Blood pressure: the standing keep-the-spread preference. Readings are
+        // sparse today, but a day with several of them should keep its range —
+        // a single high reading is the thing worth not averaging away.
+        MetricKind::BloodPressureSystolic | MetricKind::BloodPressureDiastolic => {
+            DailyAgg::AvgMinMax
+        }
 
         // BreathingDisturbances: `max` holds the worst figure of the day, so a
         // bad night can never be averaged into unremarkability, while `value`
@@ -708,17 +719,20 @@ mod tests {
             (MetricKind::BreathingDisturbances, DailyAgg::AvgMinMax),
             (MetricKind::RespiratoryRate, DailyAgg::AvgMinMax),
             (MetricKind::CardioRecovery, DailyAgg::AvgMinMax),
+            (MetricKind::BloodPressureSystolic, DailyAgg::AvgMinMax),
+            (MetricKind::BloodPressureDiastolic, DailyAgg::AvgMinMax),
             (MetricKind::ActiveEnergy, DailyAgg::Sum),
             (MetricKind::Steps, DailyAgg::Sum),
             (MetricKind::ExerciseMinutes, DailyAgg::Sum),
             (MetricKind::WalkingDistance, DailyAgg::Sum),
             (MetricKind::StandMinutes, DailyAgg::Sum),
+            (MetricKind::FlightsClimbed, DailyAgg::Sum),
             (MetricKind::WalkingSpeed, DailyAgg::Mean),
             (MetricKind::GaitAsymmetry, DailyAgg::Mean),
             (MetricKind::GaitDoubleSupport, DailyAgg::Mean),
             (MetricKind::StepLength, DailyAgg::Mean),
         ];
-        assert_eq!(expected.len(), 19, "all non-sleep kinds must be listed");
+        assert_eq!(expected.len(), 22, "all non-sleep kinds must be listed");
         for (kind, agg) in expected {
             assert_eq!(daily_agg(kind), Some(agg), "{kind:?}");
         }
@@ -737,7 +751,7 @@ mod tests {
             );
         }
         // Nothing escaped the table above.
-        assert_eq!(MetricKind::iter().count(), 25);
+        assert_eq!(MetricKind::iter().count(), 28);
     }
 
     #[test]

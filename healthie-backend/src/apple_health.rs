@@ -219,14 +219,18 @@ fn render_kinds(out: &mut String, report: &ImportReport) {
     }
 }
 
-/// Whether a percent-typed kind's observed span suggests Apple gave us a 0-1
+/// Whether a percent-typed kind's observed span suggests it is still a 0-1
 /// fraction rather than a 0-100 percentage.
 ///
-/// Worth flagging rather than leaving to the eye: `GaitAsymmetry` legitimately
-/// runs 0-5 %, so `0.000 .. 0.050` and `0.000 .. 5.000` are easy to skim past,
-/// and only one of them is right.
+/// `units.rs` now scales Apple's percent fractions on the way in, so this
+/// should never fire on `export.xml` data — it stays as a tripwire against a
+/// future source that does not, and its silence is now itself a signal.
+///
+/// `value_max > 0.0` keeps an all-zero kind from tripping it: a column of
+/// zeros is unscalable either way, and flagging it would be noise of exactly
+/// the kind this report cannot afford.
 fn looks_like_a_fraction(kind: &KindReport) -> bool {
-    kind.unit == "%" && kind.days > 0 && kind.value_max <= 1.0
+    kind.unit == "%" && kind.days > 0 && kind.value_max > 0.0 && kind.value_max <= 1.0
 }
 
 fn render_sum_sources(out: &mut String, report: &ImportReport) {
@@ -572,15 +576,49 @@ mod tests {
         );
     }
 
+    /// After the units.rs scaling fix this is the normal case, so the flag
+    /// must go quiet — otherwise it becomes the false alarm this report has
+    /// already had to fix once.
     #[test]
     fn percentages_already_in_0_100_are_not_flagged() {
+        let mut report = base();
+        // The four %-typed kinds at their real post-scaling spans, from Steve's
+        // 7.6M-record export.
+        report.per_kind = vec![
+            (MetricKind::BodyFat, 0.0, 30.3),
+            (MetricKind::Spo2, 0.0, 98.5),
+            (MetricKind::GaitAsymmetry, 0.0, 90.0),
+            (MetricKind::GaitDoubleSupport, 25.9, 35.8),
+        ]
+        .into_iter()
+        .map(|(kind, value_min, value_max)| KindReport {
+            kind,
+            unit: "%",
+            days: 900,
+            value_min,
+            value_max,
+            overlap: None,
+        })
+        .collect();
+        let out = render(&report, Path::new("export.xml"));
+        assert!(
+            !out.contains("LOOKS LIKE A 0-1 FRACTION"),
+            "correctly-scaled percentages must not flag:\n{out}"
+        );
+        assert!(!out.contains("healthie-4u7"), "{out}");
+    }
+
+    /// A column of zeros cannot be misread in scale in any detectable way, and
+    /// flagging it would be pure noise.
+    #[test]
+    fn an_all_zero_percent_kind_is_not_flagged() {
         let mut report = base();
         report.per_kind = vec![KindReport {
             kind: MetricKind::GaitAsymmetry,
             unit: "%",
             days: 900,
             value_min: 0.0,
-            value_max: 5.0,
+            value_max: 0.0,
             overlap: None,
         }];
         let out = render(&report, Path::new("export.xml"));

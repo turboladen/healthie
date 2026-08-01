@@ -701,16 +701,82 @@ mod tests {
               </Correlation>
             </HealthData>"#,
         );
-        assert!(rows.is_empty());
         assert_eq!(
             stats.records_read, 1,
             "only the nested Record counts; Workout and friends do not"
         );
-        assert!(
-            stats
-                .quarantined
-                .contains_key("HKQuantityTypeIdentifierBloodPressureSystolic")
+        // Apple nests blood pressure inside a <Correlation>; the parser walks
+        // into it, so a curated reading there still lands.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, MetricKind::BloodPressureSystolic);
+        assert!(close(rows[0].value, 118.0));
+        assert!(stats.quarantined.is_empty());
+    }
+
+    /// A systolic/diastolic pair becomes two independent rows sharing a date —
+    /// the flat `(kind, date, value)` row cannot express the pairing, so
+    /// nothing downstream should assume one. See ADR-0006 §2.
+    #[test]
+    fn blood_pressure_lands_as_two_independent_rows() {
+        let (rows, stats) = parse(
+            r#"<HealthData>
+              <Correlation type="HKCorrelationTypeIdentifierBloodPressure"
+                           startDate="2026-07-28 08:00:00 -0700" endDate="2026-07-28 08:00:00 -0700">
+                <Record type="HKQuantityTypeIdentifierBloodPressureSystolic" unit="mmHg"
+                        startDate="2026-07-28 08:00:00 -0700" endDate="2026-07-28 08:00:00 -0700" value="118"/>
+                <Record type="HKQuantityTypeIdentifierBloodPressureDiastolic" unit="mmHg"
+                        startDate="2026-07-28 08:00:00 -0700" endDate="2026-07-28 08:00:00 -0700" value="78"/>
+              </Correlation>
+              <Record type="HKQuantityTypeIdentifierBloodPressureSystolic" unit="mmHg"
+                      startDate="2026-07-28 20:00:00 -0700" endDate="2026-07-28 20:00:00 -0700" value="130"/>
+            </HealthData>"#,
         );
+        assert_eq!(stats.records_curated, 3);
+        let sys = row_for(&rows, MetricKind::BloodPressureSystolic);
+        // Two readings that day: AvgMinMax keeps the range, so a single high
+        // reading is not averaged out of existence.
+        assert!(close(sys.value, 124.0));
+        assert_eq!((sys.min, sys.max), (Some(118.0), Some(130.0)));
+        let dia = row_for(&rows, MetricKind::BloodPressureDiastolic);
+        assert!(close(dia.value, 78.0));
+        assert_eq!(
+            sys.date, dia.date,
+            "re-paired by date at read time, if at all"
+        );
+    }
+
+    #[test]
+    fn flights_climbed_sums_and_dedupes_by_source() {
+        let (rows, _) = parse(
+            r#"<HealthData>
+              <Record type="HKQuantityTypeIdentifierFlightsClimbed" sourceName="iPhone" unit="count"
+                      startDate="2026-07-28 08:00:00 -0700" endDate="2026-07-28 08:05:00 -0700" value="4"/>
+              <Record type="HKQuantityTypeIdentifierFlightsClimbed" sourceName="Apple Watch" unit="count"
+                      startDate="2026-07-28 08:00:00 -0700" endDate="2026-07-28 08:05:00 -0700" value="7"/>
+              <Record type="HKQuantityTypeIdentifierFlightsClimbed" sourceName="Apple Watch" unit="count"
+                      startDate="2026-07-28 18:00:00 -0700" endDate="2026-07-28 18:05:00 -0700" value="3"/>
+            </HealthData>"#,
+        );
+        assert_eq!(rows.len(), 1);
+        assert!(
+            close(rows[0].value, 10.0),
+            "the winning source's total, not 14 — both devices log flights"
+        );
+    }
+
+    /// The percent scaling fix, end to end through the parser.
+    #[test]
+    fn percent_typed_records_scale_from_apple_fractions() {
+        let (rows, _) = parse(
+            r#"<HealthData>
+              <Record type="HKQuantityTypeIdentifierOxygenSaturation" unit="%"
+                      startDate="2026-07-28 08:00:00 -0700" endDate="2026-07-28 08:00:00 -0700" value="0.985"/>
+              <Record type="HKQuantityTypeIdentifierBodyFatPercentage" unit="%"
+                      startDate="2026-07-28 08:00:00 -0700" endDate="2026-07-28 08:00:00 -0700" value="0.303"/>
+            </HealthData>"#,
+        );
+        assert!(close(row_for(&rows, MetricKind::Spo2).value, 98.5));
+        assert!(close(row_for(&rows, MetricKind::BodyFat).value, 30.3));
     }
 
     /// Apple's export opens with a declaration and a DOCTYPE carrying a large

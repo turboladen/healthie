@@ -46,15 +46,38 @@ A misspelled identifier is benign-and-loud rather than silently wrong: an
 unrecognized name falls through to quarantine and appears in the import report,
 instead of landing data on the wrong kind.
 
-### 2. Per-kind daily aggregation policy
+The HAE spelling is `Option`, and `None` means that intake has **no 1:1
+counterpart** — not that one is missing. HAE models blood pressure as a single
+`blood_pressure` metric carrying `systolic` and `diastolic` fields per data
+point (verified against its published JSON format), the same 1-to-many shape as
+`sleep_analysis`, so no HAE _name_ resolves to either blood-pressure kind.
+Inventing `blood_pressure_systolic` would have made the agreement test green
+while guaranteeing nothing, since HAE never sends it. The test asserts the
+absence positively: if an HAE name is ever mapped to a blood-pressure kind, it
+fails until the table is corrected.
+
+### 2. Blood pressure is a pair the row shape cannot express
+
+`daily_metric` is flat `(kind, date, value)`, so systolic and diastolic are
+stored as **two independent rows** and re-paired by date at read time. Nothing
+records that a given systolic and diastolic were one cuff reading, and at daily
+granularity — where several readings already collapse into a mean plus a range
+— that association is not recoverable. Acceptable for trend use; readers must
+not assume the pairing is modelled. Exploding HAE's `blood_pressure` the way
+`sleep_analysis` is exploded would give the live path the same two kinds, and is
+the natural follow-up.
+
+### 3. Per-kind daily aggregation policy
 
 Each `MetricKind` declares how a day's readings collapse (`daily_agg`). The
 standing preference is **keep the spread, discard nothing** — `min`/`max`
 already exist on the row, so preserving the day's range is free.
 
-- `Sum` — Steps, ActiveEnergy, ExerciseMinutes, StandMinutes, WalkingDistance
+- `Sum` — Steps, ActiveEnergy, ExerciseMinutes, StandMinutes, WalkingDistance,
+  FlightsClimbed
 - `AvgMinMax` — HeartRate, Spo2, RespiratoryRate, Hrv, Weight, BodyFat,
-  CardioRecovery, BreathingDisturbances
+  CardioRecovery, BreathingDisturbances, BloodPressureSystolic,
+  BloodPressureDiastolic
 - `Mean` — WalkingSpeed, GaitAsymmetry, GaitDoubleSupport, RestingHeartRate,
   StepLength
 - `Max` — Vo2Max, chosen knowing it ratchets upward and will **not** surface a
@@ -72,7 +95,7 @@ return `None` because they fold from segments, and an `unreachable!()` there
 would be a production panic reachable by any future caller iterating
 `MetricKind::iter()`.
 
-### 3. Sum-kind values are a **lower bound**
+### 4. Sum-kind values are a **lower bound**
 
 Apple's export retains every device's account of the same day: an iPhone and a
 Watch both counted the same steps, and the Health app de-duplicates by source
@@ -94,7 +117,7 @@ kind, how many days had several sources and the summed-to-kept ratio, so the
 magnitude of what this discards is visible rather than assumed — evidence to
 revisit on.
 
-### 4. Sleep: an 18:00 sleep-day boundary, and interval **union** not sum
+### 5. Sleep: an 18:00 sleep-day boundary, and interval **union** not sum
 
 A night spans midnight, so some rule must place it on a calendar date. Segments
 are attributed by their **start**, whole and never split, with anything starting
@@ -125,7 +148,7 @@ Both undifferentiated spellings are handled: pre-iOS-16 `…Asleep` and iOS-16+
 `…AsleepUnspecified` feed the total with no stage row, because a decade of
 history contains years of each.
 
-### 5. Unit conversion refuses rather than coerces
+### 6. Unit conversion refuses rather than coerces
 
 `export.xml` stamps each record with the unit it was recorded in, which varies
 by locale and device. `daily_metric` has no unit column, so a value must be
@@ -138,15 +161,31 @@ Apple's `Cal` (the kilocalorie) is resolved before case folding, because a
 lowercase `cal` is conventionally the small calorie — a 1000x difference. The
 ambiguous spelling is refused rather than guessed at.
 
-**The residual risk this cannot solve:** whether Apple exports percent-typed
-quantities (`OxygenSaturation`, `BodyFatPercentage`, the two gait percentages)
-as `0.97` or `97` is undocumented, and we have no real export to check against.
-Rather than encode a guess or a heuristic, the import report prints the observed
-**value span per kind**: a spo2 column reading `0.91 .. 0.99 %` instead of
+**Percent is the one unit where matching strings mean different scales.** Apple
+writes `%` for HealthKit's `HKUnit.percent()`, which is a **0-1 fraction**;
+canonical `%` here is 0-100. Every percent-typed reading is therefore multiplied
+by 100 on the way in.
+
+This was not guessed. The first release shipped without the conversion and with
+the observed **value span per kind** printed instead, precisely because the
+scale was undocumented and no real export was available. The first real run —
+7,649,954 records, 2026-07-31 — returned `BodyFat 0.000 .. 0.303`,
+`Spo2 0.000 .. 0.985`, `GaitAsymmetry 0.000 .. 0.900`,
+`GaitDoubleSupport 0.259 .. 0.358`, answering the question outright.
+
+Waiting was the right call rather than merely the cautious one: a range
+heuristic would have got `GaitDoubleSupport` wrong. Its raw `0.259 .. 0.358` is
+entirely plausible _as_ a percentage, so an "is the max below 1.0?" rule applied
+per kind at import time would have left it 100x low while correctly fixing blood
+oxygen — and that error is exactly the plausible-looking, undetectable kind this
+ADR opens by warning about.
+
+The span report remains, now as a tripwire against a future source that does not
+scale the same way: a spo2 column reading `0.91 .. 0.99 %` instead of
 `91 .. 99 %` is obvious on sight, on run one, before anything downstream consumes
 it. The fix would be one arm in `units.rs` plus an idempotent re-run.
 
-### 6. Quarantine is one row per name — narrowing ADR-0005 §4 for this path only
+### 7. Quarantine is one row per name — narrowing ADR-0005 §4 for this path only
 
 ADR-0005 §4 quarantines per `(raw_name, date)`. HAE pushes one day at a time, so
 that is naturally bounded. A decade-wide backfill sees ~200 uncurated Apple types
@@ -177,7 +216,7 @@ reaches further back would otherwise land a _second_ row for the same name under
 a different `(raw_name, date)` key; rows for other dates are dropped as the
 sample is written.
 
-### 7. Last-write-wins, but the overlap is reported first
+### 8. Last-write-wins, but the overlap is reported first
 
 Writes obey ADR-0005 §5 — `(kind, date)` upsert, last-write-wins — so a backfill
 overwrites rows a live HAE push already landed. That is the stated contract and
@@ -259,7 +298,7 @@ The three means also share one denominator (only nights with a stored row at
 comparable to each other: a single sparse stored row would otherwise yield a
 confident verdict conjured out of nothing.
 
-### 8. Streaming parse, and where the memory actually goes
+### 9. Streaming parse, and where the memory actually goes
 
 `export.xml` is routinely multi-gigabyte, so the document is never materialized:
 a `BufRead` feeds quick-xml's pull reader and the event buffer is cleared every
@@ -288,7 +327,7 @@ transaction is held open across all of them. Bulk `ON CONFLICT` upsert
 implementation in the codebase — but if the write phase proves slow on the
 odroid, healthie-zp8 is the fix.
 
-### 9. `quick-xml`, and layering
+### 10. `quick-xml`, and layering
 
 `quick-xml` 0.41 pinned per ADR-0002's dependency policy and verified against the
 crate source rather than from memory. Its only mandatory dependency is `memchr`

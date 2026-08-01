@@ -42,100 +42,131 @@ pub(crate) enum HkMapping {
 /// and the shared [`MetricKind`] in one row so the two intake paths cannot
 /// drift apart. Adding a metric means adding one row here and one arm to
 /// `map_hae_name`; the agreement test fails until both exist.
-pub(crate) const HK_METRICS: &[(&str, &str, MetricKind)] = &[
+///
+/// The HAE spelling is `None` where that intake has **no 1:1 counterpart** —
+/// not where one merely hasn't been added. HAE models blood pressure as a
+/// single `blood_pressure` metric carrying `systolic` and `diastolic` fields
+/// per data point (verified against its published JSON format), the same
+/// 1-to-many shape as `sleep_analysis`, so no HAE *name* maps to either blood
+/// pressure kind. Inventing `blood_pressure_systolic` here would make the
+/// agreement test green while guaranteeing nothing, since HAE never sends it.
+pub(crate) const HK_METRICS: &[(&str, Option<&str>, MetricKind)] = &[
     (
         "HKQuantityTypeIdentifierBodyMass",
-        "weight_body_mass",
+        Some("weight_body_mass"),
         MetricKind::Weight,
     ),
     (
         "HKQuantityTypeIdentifierBodyFatPercentage",
-        "body_fat_percentage",
+        Some("body_fat_percentage"),
         MetricKind::BodyFat,
     ),
     (
         "HKQuantityTypeIdentifierVO2Max",
-        "vo2_max",
+        Some("vo2_max"),
         MetricKind::Vo2Max,
     ),
     (
         "HKQuantityTypeIdentifierRestingHeartRate",
-        "resting_heart_rate",
+        Some("resting_heart_rate"),
         MetricKind::RestingHeartRate,
     ),
     (
         "HKQuantityTypeIdentifierHeartRate",
-        "heart_rate",
+        Some("heart_rate"),
         MetricKind::HeartRate,
     ),
     (
         "HKQuantityTypeIdentifierHeartRateVariabilitySDNN",
-        "heart_rate_variability",
+        Some("heart_rate_variability"),
         MetricKind::Hrv,
     ),
     (
         "HKQuantityTypeIdentifierOxygenSaturation",
-        "blood_oxygen_saturation",
+        Some("blood_oxygen_saturation"),
         MetricKind::Spo2,
     ),
     (
         "HKQuantityTypeIdentifierAppleSleepingBreathingDisturbances",
-        "breathing_disturbances",
+        Some("breathing_disturbances"),
         MetricKind::BreathingDisturbances,
     ),
     (
         "HKQuantityTypeIdentifierRespiratoryRate",
-        "respiratory_rate",
+        Some("respiratory_rate"),
         MetricKind::RespiratoryRate,
     ),
     (
         "HKQuantityTypeIdentifierHeartRateRecoveryOneMinute",
-        "cardio_recovery",
+        Some("cardio_recovery"),
         MetricKind::CardioRecovery,
+    ),
+    // Blood pressure has no HAE counterpart NAME — see the table docs above.
+    // In `export.xml` these arrive as ordinary `<Record>` elements nested
+    // inside a `<Correlation>`, which the parser already walks into.
+    (
+        "HKQuantityTypeIdentifierBloodPressureSystolic",
+        None,
+        MetricKind::BloodPressureSystolic,
+    ),
+    (
+        "HKQuantityTypeIdentifierBloodPressureDiastolic",
+        None,
+        MetricKind::BloodPressureDiastolic,
     ),
     (
         "HKQuantityTypeIdentifierActiveEnergyBurned",
-        "active_energy",
+        Some("active_energy"),
         MetricKind::ActiveEnergy,
     ),
     (
         "HKQuantityTypeIdentifierStepCount",
-        "step_count",
+        Some("step_count"),
         MetricKind::Steps,
     ),
     (
         "HKQuantityTypeIdentifierAppleExerciseTime",
-        "apple_exercise_time",
+        Some("apple_exercise_time"),
         MetricKind::ExerciseMinutes,
     ),
     (
         "HKQuantityTypeIdentifierDistanceWalkingRunning",
-        "walking_running_distance",
+        Some("walking_running_distance"),
         MetricKind::WalkingDistance,
     ),
     (
         "HKQuantityTypeIdentifierAppleStandTime",
-        "apple_stand_time",
+        Some("apple_stand_time"),
         MetricKind::StandMinutes,
+    ),
+    // HAE lists this as a standalone "Flights Climbed" activity metric; the
+    // snake_case spelling follows its convention for the other 19 but could not
+    // be confirmed against a published payload. A wrong guess here is
+    // benign-and-loud, not silently wrong: HAE's real name would still
+    // quarantine and show up by name in the ingest log.
+    (
+        "HKQuantityTypeIdentifierFlightsClimbed",
+        Some("flights_climbed"),
+        MetricKind::FlightsClimbed,
     ),
     (
         "HKQuantityTypeIdentifierWalkingSpeed",
-        "walking_speed",
+        Some("walking_speed"),
         MetricKind::WalkingSpeed,
     ),
     (
         "HKQuantityTypeIdentifierWalkingAsymmetryPercentage",
-        "walking_asymmetry_percentage",
+        Some("walking_asymmetry_percentage"),
         MetricKind::GaitAsymmetry,
     ),
     (
         "HKQuantityTypeIdentifierWalkingDoubleSupportPercentage",
-        "walking_double_support_percentage",
+        Some("walking_double_support_percentage"),
         MetricKind::GaitDoubleSupport,
     ),
     (
         "HKQuantityTypeIdentifierWalkingStepLength",
-        "walking_step_length",
+        Some("walking_step_length"),
         MetricKind::StepLength,
     ),
 ];
@@ -236,7 +267,7 @@ mod tests {
     };
     use crate::{
         entities::daily_metric::MetricKind,
-        services::metrics::{EXCLUDED_HAE_NAMES, HaeMapping, map_hae_name},
+        services::metrics::{CURATED_HAE_NAMES, EXCLUDED_HAE_NAMES, HaeMapping, map_hae_name},
     };
 
     /// The whole point of the shared table: a reading that arrives by backfill
@@ -249,9 +280,45 @@ mod tests {
                 HkMapping::Curated(*kind),
                 "{hk} must map to {kind:?}"
             );
+            let Some(hae) = hae else { continue };
             assert!(
                 matches!(map_hae_name(hae), HaeMapping::Curated(k) if k == *kind),
                 "HAE name {hae} disagrees with export.xml name {hk} (expected {kind:?})"
+            );
+        }
+    }
+
+    /// `None` means the live path genuinely has no route to that kind, not that
+    /// someone forgot to fill it in — so assert the absence rather than
+    /// skipping. If an HAE name is ever mapped to a blood pressure kind (the
+    /// right fix being to explode `blood_pressure` the way `sleep_analysis` is
+    /// exploded), this fails until the table is updated to match.
+    #[test]
+    fn kinds_without_an_hae_name_are_genuinely_unreachable_from_the_live_path() {
+        let unpaired: Vec<MetricKind> = HK_METRICS
+            .iter()
+            .filter(|(_, hae, _)| hae.is_none())
+            .map(|(_, _, kind)| *kind)
+            .collect();
+        assert_eq!(
+            unpaired,
+            vec![
+                MetricKind::BloodPressureSystolic,
+                MetricKind::BloodPressureDiastolic
+            ],
+            "only blood pressure is expected to lack an HAE counterpart"
+        );
+
+        // Exhaustive over the ENTIRE live vocabulary, not just over the names
+        // this table happens to repeat back: an arm added to the HAE side alone
+        // would otherwise sail past, which is exactly the drift being guarded
+        // against.
+        for (hae, kind) in CURATED_HAE_NAMES {
+            assert!(
+                !unpaired.contains(kind),
+                "the live path now maps {hae} to {kind:?}, but HK_METRICS still declares that \
+                 kind has no HAE counterpart — explode `blood_pressure` into both kinds and pair \
+                 them here, or the two intakes disagree"
             );
         }
     }

@@ -46,33 +46,55 @@ pub(crate) const EXCLUDED_HAE_NAMES: &[&str] = &[
     "headphone_audio_exposure",
 ];
 
+/// The HAE metric name that carries per-stage sleep, exploded by [`sleep_rows`].
+pub(crate) const HAE_SLEEP_ANALYSIS: &str = "sleep_analysis";
+
+/// Every HAE metric name this build curates, and the [`MetricKind`] it lands
+/// on.
+///
+/// A table rather than a `match` so the live vocabulary is **enumerable**. That
+/// matters for one specific guarantee: the Apple Health backfill's `HK_METRICS`
+/// declares which kinds have no HAE counterpart at all, and only an enumerable
+/// list lets a test assert that no HAE name resolves to one of them. A `match`
+/// can only answer questions about names you already thought to ask.
+pub(crate) const CURATED_HAE_NAMES: &[(&str, MetricKind)] = &[
+    ("weight_body_mass", MetricKind::Weight),
+    ("body_fat_percentage", MetricKind::BodyFat),
+    ("vo2_max", MetricKind::Vo2Max),
+    ("resting_heart_rate", MetricKind::RestingHeartRate),
+    ("heart_rate", MetricKind::HeartRate),
+    ("heart_rate_variability", MetricKind::Hrv),
+    ("blood_oxygen_saturation", MetricKind::Spo2),
+    ("breathing_disturbances", MetricKind::BreathingDisturbances),
+    ("respiratory_rate", MetricKind::RespiratoryRate),
+    ("cardio_recovery", MetricKind::CardioRecovery),
+    ("active_energy", MetricKind::ActiveEnergy),
+    ("step_count", MetricKind::Steps),
+    ("apple_exercise_time", MetricKind::ExerciseMinutes),
+    ("walking_running_distance", MetricKind::WalkingDistance),
+    ("apple_stand_time", MetricKind::StandMinutes),
+    ("flights_climbed", MetricKind::FlightsClimbed),
+    ("walking_speed", MetricKind::WalkingSpeed),
+    ("walking_asymmetry_percentage", MetricKind::GaitAsymmetry),
+    (
+        "walking_double_support_percentage",
+        MetricKind::GaitDoubleSupport,
+    ),
+    ("walking_step_length", MetricKind::StepLength),
+];
+
 /// Classify an HAE metric `name` into curated / sleep / excluded / unknown.
 pub(crate) fn map_hae_name(name: &str) -> HaeMapping {
-    let kind = match name {
-        "weight_body_mass" => MetricKind::Weight,
-        "body_fat_percentage" => MetricKind::BodyFat,
-        "vo2_max" => MetricKind::Vo2Max,
-        "resting_heart_rate" => MetricKind::RestingHeartRate,
-        "heart_rate" => MetricKind::HeartRate,
-        "heart_rate_variability" => MetricKind::Hrv,
-        "blood_oxygen_saturation" => MetricKind::Spo2,
-        "breathing_disturbances" => MetricKind::BreathingDisturbances,
-        "respiratory_rate" => MetricKind::RespiratoryRate,
-        "cardio_recovery" => MetricKind::CardioRecovery,
-        "active_energy" => MetricKind::ActiveEnergy,
-        "step_count" => MetricKind::Steps,
-        "apple_exercise_time" => MetricKind::ExerciseMinutes,
-        "walking_running_distance" => MetricKind::WalkingDistance,
-        "apple_stand_time" => MetricKind::StandMinutes,
-        "walking_speed" => MetricKind::WalkingSpeed,
-        "walking_asymmetry_percentage" => MetricKind::GaitAsymmetry,
-        "walking_double_support_percentage" => MetricKind::GaitDoubleSupport,
-        "walking_step_length" => MetricKind::StepLength,
-        "sleep_analysis" => return HaeMapping::Sleep,
-        other if EXCLUDED_HAE_NAMES.contains(&other) => return HaeMapping::Excluded,
-        _ => return HaeMapping::Unknown,
-    };
-    HaeMapping::Curated(kind)
+    if name == HAE_SLEEP_ANALYSIS {
+        return HaeMapping::Sleep;
+    }
+    if let Some((_, kind)) = CURATED_HAE_NAMES.iter().find(|(n, _)| *n == name) {
+        return HaeMapping::Curated(*kind);
+    }
+    if EXCLUDED_HAE_NAMES.contains(&name) {
+        return HaeMapping::Excluded;
+    }
+    HaeMapping::Unknown
 }
 
 /// Explode a `sleep_analysis` point into `(kind, hours)` pairs. A stage field

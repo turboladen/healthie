@@ -15,6 +15,19 @@
 
 use crate::entities::daily_metric::MetricKind;
 
+/// Apple writes `%` for `HealthKit`'s `HKUnit.percent()`, which is a **0-1
+/// fraction**, not a 0-100 percentage: 30.3% body fat is exported as `0.303`
+/// and a 98.5% blood-oxygen reading as `0.985`. Our canonical `%` is 0-100, so
+/// the same unit string means a different scale on each side and every
+/// percent-typed reading is scaled on the way in.
+///
+/// Confirmed against a real 7.6M-record export (2026-07-31), not inferred —
+/// and worth the wait, because a range heuristic would have got it wrong:
+/// `GaitDoubleSupport` arrived spanning `0.259 .. 0.358`, entirely plausible
+/// *as* a percentage, so guessing would have left that one 100x low while
+/// correctly fixing blood oxygen.
+const PERCENT_SCALE: f64 = 100.0;
+
 /// Convert `value` from `raw_unit` into `kind`'s canonical unit.
 ///
 /// Returns `None` when no conversion is known — the caller must quarantine
@@ -22,15 +35,26 @@ use crate::entities::daily_metric::MetricKind;
 /// tolerate Apple's punctuation variants (`mL/min·kg` vs `ml/(kg·min)`).
 pub(crate) fn convert_to_canonical(raw_unit: &str, kind: MetricKind, value: f64) -> Option<f64> {
     let target = kind.unit();
-    if raw_unit == target {
+    // Fast path for the overwhelming majority of records: byte-identical unit
+    // strings that also agree on scale. Percent is excluded because it is the
+    // one unit where the strings match but the scales do not.
+    if raw_unit == target && !is_percent(target) {
         return Some(value);
     }
     let from = normalize_unit(raw_unit);
     let to = normalize_unit(target);
     if from == to {
-        return Some(value);
+        return Some(if is_percent(&to) {
+            value * PERCENT_SCALE
+        } else {
+            value
+        });
     }
     factor(&from, &to).map(|f| value * f)
+}
+
+fn is_percent(unit: &str) -> bool {
+    unit == "%"
 }
 
 /// Fold a unit string to a comparison token: case, whitespace, parentheses and
@@ -138,8 +162,50 @@ mod tests {
             61.0
         ));
         assert!(close(
-            convert_to_canonical("%", MetricKind::Spo2, 97.0).unwrap(),
-            97.0
+            convert_to_canonical("mmHg", MetricKind::BloodPressureSystolic, 118.0).unwrap(),
+            118.0
+        ));
+    }
+
+    /// The one unit where matching strings do NOT mean matching scales: Apple's
+    /// `%` is a 0-1 fraction, ours is 0-100.
+    #[test]
+    fn apple_percent_fractions_scale_to_0_100() {
+        // Real spans from Steve's export: body fat 0.303, blood oxygen 0.985.
+        assert!(close(
+            convert_to_canonical("%", MetricKind::BodyFat, 0.303).unwrap(),
+            30.3
+        ));
+        assert!(close(
+            convert_to_canonical("%", MetricKind::Spo2, 0.985).unwrap(),
+            98.5
+        ));
+        // Including the one a range heuristic would have got wrong: 0.259
+        // reads as a plausible percentage on its own.
+        assert!(close(
+            convert_to_canonical("%", MetricKind::GaitDoubleSupport, 0.259).unwrap(),
+            25.9
+        ));
+        assert!(close(
+            convert_to_canonical("%", MetricKind::GaitAsymmetry, 0.9).unwrap(),
+            90.0
+        ));
+    }
+
+    /// Scaling must not leak into units that merely look similar.
+    #[test]
+    fn percent_scaling_is_confined_to_percent_kinds() {
+        assert!(close(
+            convert_to_canonical("count/min", MetricKind::HeartRate, 61.0).unwrap(),
+            61.0
+        ));
+        assert!(close(
+            convert_to_canonical("count", MetricKind::FlightsClimbed, 12.0).unwrap(),
+            12.0
+        ));
+        assert!(close(
+            convert_to_canonical("mmHg", MetricKind::BloodPressureDiastolic, 78.0).unwrap(),
+            78.0
         ));
     }
 
