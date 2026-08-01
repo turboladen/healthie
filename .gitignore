@@ -15,5 +15,11 @@ target/
 # Runtime data (SQLite DB + files) — never committed
 /data/
 
+# Apple Health exports — multi-GB dumps of personal health records.
+# Landing one here is normal (healthie-backend import-apple-health reads it);
+# committing one never is.
+/apple_health_export/
+/export.zip
+
 # Local MCP server config — holds a personal LAN bearer token; never commit
 .mcp.json
