@@ -63,7 +63,7 @@ stored as **two independent rows** and re-paired by date at read time. Nothing
 records that a given systolic and diastolic were one cuff reading, and at daily
 granularity — where several readings already collapse into a mean plus a range
 — that association is not recoverable. Acceptable for trend use; readers must
-not assume the pairing is modelled. Exploding HAE's `blood_pressure` the way
+not assume the pairing is modeled. Exploding HAE's `blood_pressure` the way
 `sleep_analysis` is exploded would give the live path the same two kinds, and is
 the natural follow-up.
 
@@ -166,19 +166,24 @@ writes `%` for HealthKit's `HKUnit.percent()`, which is a **0-1 fraction**;
 canonical `%` here is 0-100. Every percent-typed reading is therefore multiplied
 by 100 on the way in.
 
-This was not guessed. The first release shipped without the conversion and with
-the observed **value span per kind** printed instead, precisely because the
-scale was undocumented and no real export was available. The first real run —
-7,649,954 records, 2026-07-31 — returned `BodyFat 0.000 .. 0.303`,
-`Spo2 0.000 .. 0.985`, `GaitAsymmetry 0.000 .. 0.900`,
-`GaitDoubleSupport 0.259 .. 0.358`, answering the question outright.
+This was not guessed. The importer was built against synthetic fixtures with no
+real export available, so rather than assume a scale it deliberately applied no
+conversion and printed the observed **value span per kind** instead — turning an
+undocumented assumption into a number the operator would read on the first run.
 
-Waiting was the right call rather than merely the cautious one: a range
-heuristic would have got `GaitDoubleSupport` wrong. Its raw `0.259 .. 0.358` is
-entirely plausible _as_ a percentage, so an "is the max below 1.0?" rule applied
-per kind at import time would have left it 100x low while correctly fixing blood
-oxygen — and that error is exactly the plausible-looking, undetectable kind this
-ADR opens by warning about.
+That run happened before this work merged: 7,649,954 records over 2011-02-17 to
+2026-07-31, which returned `BodyFat 0.000 .. 0.303`, `Spo2 0.000 .. 0.985`,
+`GaitAsymmetry 0.000 .. 0.900` and `GaitDoubleSupport 0.259 .. 0.358` — a 0-1
+fraction on every percent-typed kind, answering the question outright. The
+conversion above was added in response, and the span report now doubles as the
+regression check: a correctly scaled percent kind no longer trips the warning.
+
+Deferring the decision was right rather than merely cautious, because a range
+heuristic would have gotten `GaitDoubleSupport` wrong. Its raw
+`0.259 .. 0.358` is entirely plausible _as_ a percentage, so an "is the max
+below 1.0?" rule applied per kind at import time would have left it 100x low
+while correctly fixing blood oxygen — exactly the plausible-looking,
+undetectable error this ADR opens by warning about.
 
 The span report remains, now as a tripwire against a future source that does not
 scale the same way: a spo2 column reading `0.91 .. 0.99 %` instead of
@@ -261,9 +266,9 @@ worst).
 Sleep gets a dedicated check, because a day-shifted `SleepTotal` is invisible to
 every other guard — a shifted row's value span looks perfectly normal. Each
 reconstructed night is compared against existing rows one day either side; if a
-neighbour fits decisively better, the run says so and names the constant to
+neighbor fits decisively better, the run says so and names the constant to
 change. It is deliberately conservative — ties resolve to same-day, and a
-neighbour must win both proportionally and absolutely — because the warning tells
+neighbor must win both proportionally and absolutely — because the warning tells
 the operator to re-import a decade of history.
 
 **The check is only meaningful on the first import into a store holding live HAE

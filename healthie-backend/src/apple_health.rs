@@ -419,9 +419,9 @@ mod tests {
         assert!(!out.contains("MISMATCH"), "a tie is not a mismatch:\n{out}");
     }
 
-    /// Nor must ordinary noise, where a neighbour happens to edge ahead.
+    /// Nor must ordinary noise, where a neighbor happens to edge ahead.
     #[test]
-    fn marginally_better_neighbour_does_not_raise_a_mismatch() {
+    fn marginally_better_neighbor_does_not_raise_a_mismatch() {
         let mut report = base();
         report.sleep_day_shift = SleepDayShift::Compared {
             compared_days: 400,
@@ -434,7 +434,7 @@ mod tests {
     }
 
     /// The value span is the tripwire for a unit-scale mistake, so it has to be
-    /// visible and labelled.
+    /// visible and labeled.
     #[test]
     fn per_kind_span_and_overlap_are_shown() {
         let mut report = base();

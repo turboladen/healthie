@@ -179,7 +179,7 @@ pub enum SleepDayShift {
     },
 }
 
-/// A neighbouring day must fit at least this much better, proportionally,
+/// A neighboring day must fit at least this much better, proportionally,
 /// before we call the boundary wrong.
 const MATERIAL_SHIFT_RATIO: f64 = 0.5;
 
@@ -193,9 +193,9 @@ const MATERIAL_SHIFT_HOURS: f64 = 0.25;
 pub enum SleepDayVerdict {
     /// Nothing to compare against — the boundary was not checked by this run.
     Unverified,
-    /// Same-day fits, or no neighbour fits materially better.
+    /// Same-day fits, or no neighbor fits materially better.
     Agrees,
-    /// A neighbouring day fits decisively better; `offset` is which one.
+    /// A neighboring day fits decisively better; `offset` is which one.
     Mismatch { offset: i8 },
 }
 
@@ -232,7 +232,7 @@ impl SleepDayShift {
     ///
     /// Deliberately conservative. This warning tells the operator to change a
     /// constant and re-import a decade of history, so it fires only when a
-    /// neighbouring day fits both proportionally and absolutely better — never
+    /// neighboring day fits both proportionally and absolutely better — never
     /// on a tie, never on noise, and never against this import's own output.
     #[must_use]
     pub fn verdict(&self) -> SleepDayVerdict {
@@ -1104,7 +1104,7 @@ mod tests {
         let db = test_db().await;
         let now = datetime("2026-07-30 08:00:00");
         // Existing rows carrying our night's ~6 hours one day EARLIER, plus
-        // unrelated neighbours so the comparison has something to reject. The
+        // unrelated neighbors so the comparison has something to reject. The
         // 5.97 is deliberately NOT 6.0: an independently-computed rollup never
         // matches a reconstruction bit-for-bit, and exact equality is what
         // flags a self-comparison.
@@ -1152,7 +1152,7 @@ mod tests {
         );
     }
 
-    /// Three consecutive nights, so every night has both neighbours and the
+    /// Three consecutive nights, so every night has both neighbors and the
     /// comparison can actually run.
     const THREE_NIGHTS: &str = r#"<HealthData>
       <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Watch"
@@ -1191,7 +1191,7 @@ mod tests {
     }
 
     #[test]
-    fn a_marginal_neighbour_is_not_a_mismatch() {
+    fn a_marginal_neighbor_is_not_a_mismatch() {
         // Better, but neither proportionally nor absolutely decisive.
         let shift = SleepDayShift::Compared {
             compared_days: 100,
@@ -1246,7 +1246,7 @@ mod tests {
         assert_eq!(
             report.sleep_day_shift,
             SleepDayShift::NoComparableRows,
-            "no night has all three neighbours stored, so nothing is comparable"
+            "no night has all three neighbors stored, so nothing is comparable"
         );
         assert_eq!(
             report.sleep_day_shift.verdict(),

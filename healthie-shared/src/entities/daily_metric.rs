@@ -81,7 +81,7 @@ pub enum MetricKind {
     #[sea_orm(string_value = "cardio-recovery")]
     #[serde(rename = "cardio-recovery")]
     CardioRecovery,
-    /// Stored as its own row; the systolic/diastolic *pairing* is not modelled
+    /// Stored as its own row; the systolic/diastolic *pairing* is not modeled
     /// — see ADR-0006 §2.
     #[sea_orm(string_value = "blood-pressure-systolic")]
     #[serde(rename = "blood-pressure-systolic")]

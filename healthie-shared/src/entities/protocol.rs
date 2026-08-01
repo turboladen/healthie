@@ -35,7 +35,7 @@ pub enum ProtocolKind {
     Habit,
 }
 
-/// Retrospective judgement on whether a protocol worked.
+/// Retrospective judgment on whether a protocol worked.
 /// `ProtocolVerdict::iter()` enumerates the legal values.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]

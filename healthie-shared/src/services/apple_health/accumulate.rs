@@ -71,7 +71,7 @@ pub(crate) enum DailyAgg {
     /// Total the day's readings — for counters that accumulate, where each
     /// record is a slice of the day.
     ///
-    /// Not a plain sum: a day's records are first totalled **per source**, and
+    /// Not a plain sum: a day's records are first totaled **per source**, and
     /// the largest single source wins. Apple's export keeps every device's
     /// version of the same day, so an iPhone and a Watch that both counted
     /// steps would otherwise roughly double the total. This makes Sum-kind
