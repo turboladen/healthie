@@ -209,7 +209,17 @@ struct Complaint {
     reason: QuarantineReason,
     units: Option<String>,
     kinds: Vec<MetricKind>,
+    /// Whether any point for this key still landed a row.
     stored: bool,
+    /// Whether `point` came from a point that stored **nothing**.
+    ///
+    /// `quarantined_metric` holds one row per `(raw_name, date)` but refusals
+    /// are per point, so when two points collide on a day one of them has to be
+    /// the one preserved. A point that stored nothing outranks one that only
+    /// lost a bound: its reading exists nowhere else, while the partial one's
+    /// value is in `daily_metric` and only the bound was dropped. Whichever
+    /// point happened to come first in the array must not decide that.
+    point_is_total_loss: bool,
 }
 
 /// Ingest one HAE health-metrics payload into `daily_metric` (curated) and
@@ -416,16 +426,16 @@ impl Ingest {
         units: Option<&str>,
         kind: Option<MetricKind>,
     ) {
-        complain(&mut self.complaints, key, point, reason, units, kind);
+        complain(&mut self.complaints, key, point, reason, units, kind, false);
     }
 
     /// [`Self::complain`] for a point that still stored a row — only a bound
     /// was dropped.
     ///
-    /// `stored` latches on regardless of what else this key has recorded. A
-    /// day can carry both a fully refused point and a partially stored one,
-    /// and a row genuinely landed, so reporting otherwise would contradict the
-    /// database over which of two points happened to come first in the array.
+    /// A day can carry both a fully refused point and a partially stored one.
+    /// `stored` latches on because a row genuinely landed, and the preserved
+    /// point is chosen by severity, so neither answer depends on which point
+    /// happened to come first in the array.
     fn complain_stored(
         &mut self,
         key: (&str, NaiveDate),
@@ -434,21 +444,22 @@ impl Ingest {
         units: Option<&str>,
         kind: Option<MetricKind>,
     ) {
-        complain(&mut self.complaints, key, point, reason, units, kind).stored = true;
+        complain(&mut self.complaints, key, point, reason, units, kind, true);
     }
 }
 
 /// Record that `(name, date)` could not be fully stored, returning the running
 /// complaint. Merges into whatever this key already holds, so a point refused
 /// for several kinds lands one row.
-fn complain<'a>(
-    complaints: &'a mut BTreeMap<(String, NaiveDate), Complaint>,
+fn complain(
+    complaints: &mut BTreeMap<(String, NaiveDate), Complaint>,
     (name, date): (&str, NaiveDate),
     point: &serde_json::Value,
     reason: QuarantineReason,
     units: Option<&str>,
     kind: Option<MetricKind>,
-) -> &'a mut Complaint {
+    stored: bool,
+) {
     let entry = complaints
         .entry((name.to_owned(), date))
         .or_insert_with(|| Complaint {
@@ -456,14 +467,23 @@ fn complain<'a>(
             reason,
             units: units.map(str::to_owned),
             kinds: Vec::new(),
-            stored: false,
+            stored,
+            point_is_total_loss: !stored,
         });
+    // Severity decides which point the single row preserves, not arrival
+    // order — see `Complaint::point_is_total_loss`.
+    if !stored && !entry.point_is_total_loss {
+        entry.point = point.clone();
+        entry.reason = reason;
+        entry.units = units.map(str::to_owned);
+        entry.point_is_total_loss = true;
+    }
+    entry.stored |= stored;
     if let Some(kind) = kind
         && !entry.kinds.contains(&kind)
     {
         entry.kinds.push(kind);
     }
-    entry
 }
 
 /// Write every accumulated complaint, and describe them for the report.
@@ -1327,6 +1347,17 @@ mod tests {
             assert!(
                 report.refused[0].stored,
                 "{order}: a row IS in the table, so the report must not say otherwise"
+            );
+
+            // One quarantine row per (name, date), so one of the two points is
+            // what survives. It must be the one that stored NOTHING: its
+            // reading exists nowhere else, while the other point's value is in
+            // daily_metric above and only its bound was dropped.
+            let held = quarantined_metric::Entity::find().all(db).await.unwrap();
+            assert_eq!(held.len(), 1, "{order}");
+            assert_eq!(
+                held[0].raw_point["qty"], 0.0,
+                "{order}: the totally-lost point must be the one preserved"
             );
         }
     }
