@@ -47,10 +47,12 @@ it's an ADR.
 
 ## Index
 
-| ADR                                             | Status   | Decision                                                     |
-| ----------------------------------------------- | -------- | ------------------------------------------------------------ |
-| [0001](0001-record-architecture-decisions.md)   | Accepted | Adopt ADRs as the durable decision record                    |
-| [0002](0002-personal-domain-pattern-rebuild.md) | Accepted | Rebuild on the personal-domain pattern: checkin loop first   |
-| [0003](0003-typed-domain.md)                    | Accepted | Typed domain: chrono timestamps + SeaORM enums               |
-| [0004](0004-claims-registry.md)                 | Accepted | Claims-with-confidence registry: provenance, not transcripts |
-| [0005](0005-metrics-ingest-and-backend.md)      | Accepted | Metrics ingest + one-binary backend; kinded auth tokens      |
+| ADR                                             | Status   | Decision                                                      |
+| ----------------------------------------------- | -------- | ------------------------------------------------------------- |
+| [0001](0001-record-architecture-decisions.md)   | Accepted | Adopt ADRs as the durable decision record                     |
+| [0002](0002-personal-domain-pattern-rebuild.md) | Accepted | Rebuild on the personal-domain pattern: checkin loop first    |
+| [0003](0003-typed-domain.md)                    | Accepted | Typed domain: chrono timestamps + SeaORM enums                |
+| [0004](0004-claims-registry.md)                 | Accepted | Claims-with-confidence registry: provenance, not transcripts  |
+| [0005](0005-metrics-ingest-and-backend.md)      | Accepted | Metrics ingest + one-binary backend; kinded auth tokens       |
+| [0006](0006-apple-health-backfill.md)           | Accepted | Apple Health `export.xml` backfill: reconstructing the rollup |
+| [0007](0007-live-path-intake-hardening.md)      | Accepted | Live-path hardening: refuse don't coerce, bound don't clamp   |
