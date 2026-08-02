@@ -46,33 +46,55 @@ pub(crate) const EXCLUDED_HAE_NAMES: &[&str] = &[
     "headphone_audio_exposure",
 ];
 
+/// The HAE metric name that carries per-stage sleep, exploded by [`sleep_rows`].
+pub(crate) const HAE_SLEEP_ANALYSIS: &str = "sleep_analysis";
+
+/// Every HAE metric name this build curates, and the [`MetricKind`] it lands
+/// on.
+///
+/// A table rather than a `match` so the live vocabulary is **enumerable**. That
+/// matters for one specific guarantee: the Apple Health backfill's `HK_METRICS`
+/// declares which kinds have no HAE counterpart at all, and only an enumerable
+/// list lets a test assert that no HAE name resolves to one of them. A `match`
+/// can only answer questions about names you already thought to ask.
+pub(crate) const CURATED_HAE_NAMES: &[(&str, MetricKind)] = &[
+    ("weight_body_mass", MetricKind::Weight),
+    ("body_fat_percentage", MetricKind::BodyFat),
+    ("vo2_max", MetricKind::Vo2Max),
+    ("resting_heart_rate", MetricKind::RestingHeartRate),
+    ("heart_rate", MetricKind::HeartRate),
+    ("heart_rate_variability", MetricKind::Hrv),
+    ("blood_oxygen_saturation", MetricKind::Spo2),
+    ("breathing_disturbances", MetricKind::BreathingDisturbances),
+    ("respiratory_rate", MetricKind::RespiratoryRate),
+    ("cardio_recovery", MetricKind::CardioRecovery),
+    ("active_energy", MetricKind::ActiveEnergy),
+    ("step_count", MetricKind::Steps),
+    ("apple_exercise_time", MetricKind::ExerciseMinutes),
+    ("walking_running_distance", MetricKind::WalkingDistance),
+    ("apple_stand_time", MetricKind::StandMinutes),
+    ("flights_climbed", MetricKind::FlightsClimbed),
+    ("walking_speed", MetricKind::WalkingSpeed),
+    ("walking_asymmetry_percentage", MetricKind::GaitAsymmetry),
+    (
+        "walking_double_support_percentage",
+        MetricKind::GaitDoubleSupport,
+    ),
+    ("walking_step_length", MetricKind::StepLength),
+];
+
 /// Classify an HAE metric `name` into curated / sleep / excluded / unknown.
 pub(crate) fn map_hae_name(name: &str) -> HaeMapping {
-    let kind = match name {
-        "weight_body_mass" => MetricKind::Weight,
-        "body_fat_percentage" => MetricKind::BodyFat,
-        "vo2_max" => MetricKind::Vo2Max,
-        "resting_heart_rate" => MetricKind::RestingHeartRate,
-        "heart_rate" => MetricKind::HeartRate,
-        "heart_rate_variability" => MetricKind::Hrv,
-        "blood_oxygen_saturation" => MetricKind::Spo2,
-        "breathing_disturbances" => MetricKind::BreathingDisturbances,
-        "respiratory_rate" => MetricKind::RespiratoryRate,
-        "cardio_recovery" => MetricKind::CardioRecovery,
-        "active_energy" => MetricKind::ActiveEnergy,
-        "step_count" => MetricKind::Steps,
-        "apple_exercise_time" => MetricKind::ExerciseMinutes,
-        "walking_running_distance" => MetricKind::WalkingDistance,
-        "apple_stand_time" => MetricKind::StandMinutes,
-        "walking_speed" => MetricKind::WalkingSpeed,
-        "walking_asymmetry_percentage" => MetricKind::GaitAsymmetry,
-        "walking_double_support_percentage" => MetricKind::GaitDoubleSupport,
-        "walking_step_length" => MetricKind::StepLength,
-        "sleep_analysis" => return HaeMapping::Sleep,
-        other if EXCLUDED_HAE_NAMES.contains(&other) => return HaeMapping::Excluded,
-        _ => return HaeMapping::Unknown,
-    };
-    HaeMapping::Curated(kind)
+    if name == HAE_SLEEP_ANALYSIS {
+        return HaeMapping::Sleep;
+    }
+    if let Some((_, kind)) = CURATED_HAE_NAMES.iter().find(|(n, _)| *n == name) {
+        return HaeMapping::Curated(*kind);
+    }
+    if EXCLUDED_HAE_NAMES.contains(&name) {
+        return HaeMapping::Excluded;
+    }
+    HaeMapping::Unknown
 }
 
 /// Explode a `sleep_analysis` point into `(kind, hours)` pairs. A stage field
@@ -205,14 +227,23 @@ pub async fn ingest_hae<C: ConnectionTrait + TransactionTrait>(
     })
 }
 
+/// Parse a `YYYY-MM-DD HH:MM:SS ±HHMM` stamp into an offset-aware instant.
+///
+/// Both metric intake paths — HAE's JSON `date` and the Apple Health
+/// `export.xml` `startDate`/`endDate` attributes — use this identical wire
+/// format, and both must interpret the offset the same way or a backfilled row
+/// and a live row for the same reading would land on different days. One parse,
+/// one format string, shared deliberately (ADR-0005 §5).
+pub(crate) fn parse_local(s: &str) -> Option<DateTime<FixedOffset>> {
+    DateTime::<FixedOffset>::parse_from_str(s, "%Y-%m-%d %H:%M:%S %z").ok()
+}
+
 /// Parse the point's `date` into its LOCAL calendar day. HAE stamps a local
 /// offset (e.g. `-0700`); the metric belongs to that local day, so we take
 /// `date_naive()` on the `FixedOffset` value and never UTC-convert.
 fn point_date(point: &serde_json::Value) -> Option<NaiveDate> {
     let s = point.get("date")?.as_str()?;
-    DateTime::<FixedOffset>::parse_from_str(s, "%Y-%m-%d %H:%M:%S %z")
-        .ok()
-        .map(|dt| dt.date_naive())
+    parse_local(s).map(|dt| dt.date_naive())
 }
 
 fn point_source(point: &serde_json::Value) -> Option<String> {
@@ -248,9 +279,14 @@ fn warn_on_unit_mismatch(kind: MetricKind, hae_units: Option<&str>) {
 
 /// Upsert one `daily_metric` row on `(kind, date)` (last-write-wins). Branches
 /// `insert`/`update` explicitly — never `.save()` with a `Set` PK.
+///
+/// Returns the row as it stood **before** this write, or `None` if this was an
+/// insert. The lookup happens either way, so returning it is free; the Apple
+/// Health backfill uses it to report how far its reconstructed values diverge
+/// from rows a live HAE push already landed, *before* overwriting them.
 // A private helper threading one row's columns; the arg list mirrors the table.
 #[allow(clippy::too_many_arguments)]
-async fn upsert_metric<C: ConnectionTrait>(
+pub(crate) async fn upsert_metric<C: ConnectionTrait>(
     db: &C,
     kind: MetricKind,
     date: NaiveDate,
@@ -259,44 +295,43 @@ async fn upsert_metric<C: ConnectionTrait>(
     max: Option<f64>,
     source: Option<String>,
     now: DateTime<Utc>,
-) -> DomainResult<()> {
+) -> DomainResult<Option<daily_metric::Model>> {
     let existing = daily_metric::Entity::find()
         .filter(daily_metric::Column::Kind.eq(kind))
         .filter(daily_metric::Column::Date.eq(date))
         .one(db)
         .await?;
-    match existing {
-        Some(row) => {
-            let mut active: daily_metric::ActiveModel = row.into();
-            active.value = Set(value);
-            active.min = Set(min);
-            active.max = Set(max);
-            active.source = Set(source);
-            active.updated_at = Set(now);
-            active.update(db).await?;
+    if let Some(row) = existing {
+        let prior = row.clone();
+        let mut active: daily_metric::ActiveModel = row.into();
+        active.value = Set(value);
+        active.min = Set(min);
+        active.max = Set(max);
+        active.source = Set(source);
+        active.updated_at = Set(now);
+        active.update(db).await?;
+        Ok(Some(prior))
+    } else {
+        daily_metric::ActiveModel {
+            kind: Set(kind),
+            date: Set(date),
+            value: Set(value),
+            min: Set(min),
+            max: Set(max),
+            source: Set(source),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
         }
-        None => {
-            daily_metric::ActiveModel {
-                kind: Set(kind),
-                date: Set(date),
-                value: Set(value),
-                min: Set(min),
-                max: Set(max),
-                source: Set(source),
-                created_at: Set(now),
-                updated_at: Set(now),
-                ..Default::default()
-            }
-            .insert(db)
-            .await?;
-        }
+        .insert(db)
+        .await?;
+        Ok(None)
     }
-    Ok(())
 }
 
 /// Upsert one `quarantined_metric` row on `(raw_name, date)`, overwriting the
 /// verbatim point last-write-wins.
-async fn upsert_quarantine<C: ConnectionTrait>(
+pub(crate) async fn upsert_quarantine<C: ConnectionTrait>(
     db: &C,
     raw_name: &str,
     date: NaiveDate,

@@ -2,7 +2,7 @@
 //! is kept from the retired M1b MCP server. Binds 0.0.0.0 by default (designed
 //! for Tailscale exposure; the bearer middleware is the gate).
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use healthie_shared::entities::auth_token::TokenKind;
@@ -36,6 +36,43 @@ pub enum Command {
         kind: TokenKindArg,
         #[command(subcommand)]
         action: TokenAction,
+    },
+    /// One-time backfill of an Apple Health `export.xml` into `daily_metric`.
+    ///
+    /// BACK UP THE DATABASE FIRST if it already holds data. `(kind, date)`
+    /// upserts last-write-wins, so ANY import — with or without
+    /// `--replace-range` — irreversibly overwrites whatever occupied the keys
+    /// it produces, including rows the live HAE push landed. The command warns
+    /// before it starts when the store is non-empty.
+    ///
+    /// "Idempotent" here means two narrow things and not a third: re-running
+    /// the same import converges, and a fix that changes a row's VALUE (a unit
+    /// correction) converges. Neither is non-destructive toward rows from
+    /// another source. A fix that changes a row's KEY — a sleep-day boundary or
+    /// metric-mapping change — additionally strands rows at the old dates or
+    /// kinds; those are reported, and `--replace-range` deletes them.
+    ImportAppleHealth {
+        /// Path to `export.xml` (from the Health app's "Export All Health Data").
+        path: PathBuf,
+
+        /// Delete pre-existing rows inside the imported range that this run did
+        /// not produce. BACK UP THE DATABASE FILE FIRST — this is not
+        /// recoverable.
+        ///
+        /// Use after changing the sleep-day boundary or a metric mapping, when
+        /// the previous import's rows are known to be wrong. Deletes real data,
+        /// so it is opt-in: run without it first and read the report.
+        ///
+        /// A row can look stale for reasons that have nothing to do with a
+        /// boundary change — days the live HAE push covered but this export
+        /// does not, days where every reading of a kind hit an unconvertible
+        /// unit (so no row was produced), and days deleted in the Health app.
+        /// Nothing distinguishes those from an earlier import's leftovers, so
+        /// read the listed dates before using this.
+        ///
+        /// Refused when the export is truncated.
+        #[arg(long)]
+        replace_range: bool,
     },
 }
 
@@ -89,6 +126,54 @@ mod tests {
         assert!(matches!(kind, TokenKindArg::Ingest));
         assert!(matches!(action, TokenAction::Provision));
         assert_eq!(TokenKind::from(kind), TokenKind::Ingest);
+    }
+
+    #[test]
+    fn import_apple_health_parses_with_a_path() {
+        let cli = Cli::try_parse_from([
+            "healthie-backend",
+            "import-apple-health",
+            "/data/apple_health_export/export.xml",
+        ])
+        .expect("parse");
+        let Some(Command::ImportAppleHealth {
+            path,
+            replace_range,
+        }) = cli.command
+        else {
+            panic!("expected import-apple-health subcommand");
+        };
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/data/apple_health_export/export.xml")
+        );
+        assert!(
+            !replace_range,
+            "deleting existing rows must be opt-in, never the default"
+        );
+    }
+
+    #[test]
+    fn import_apple_health_accepts_replace_range() {
+        let cli = Cli::try_parse_from([
+            "healthie-backend",
+            "import-apple-health",
+            "--replace-range",
+            "export.xml",
+        ])
+        .expect("parse");
+        let Some(Command::ImportAppleHealth { replace_range, .. }) = cli.command else {
+            panic!("expected import-apple-health subcommand");
+        };
+        assert!(replace_range);
+    }
+
+    #[test]
+    fn import_apple_health_requires_a_path() {
+        assert!(
+            Cli::try_parse_from(["healthie-backend", "import-apple-health"]).is_err(),
+            "the path is mandatory — importing nothing silently would be worse"
+        );
     }
 
     #[test]

@@ -1,0 +1,427 @@
+//! Apple Health `export.xml` type-identifier vocabulary: the curated /
+//! excluded / quarantined trichotomy of ADR-0005 §4, expressed over
+//! `HKQuantityTypeIdentifier*` and `HKCategoryTypeIdentifier*` names.
+//!
+//! The backfill and the live HAE push are two intakes onto the same
+//! `daily_metric` store, so a curated `export.xml` name MUST resolve to the
+//! same [`MetricKind`] as its HAE counterpart — otherwise the same physical
+//! reading lands on two different kinds depending on how it arrived. That is
+//! enforced structurally: [`HK_METRICS`] is a single table carrying *both*
+//! spellings alongside the kind, and `hk_and_hae_names_agree` walks it against
+//! [`map_hae_name`](crate::services::metrics::map_hae_name). There is no way to
+//! add one spelling without the other.
+//!
+//! A misspelled identifier here is benign-and-loud rather than silently wrong:
+//! an unrecognized name falls through to `Unknown` and quarantines, so it
+//! surfaces in the import report as an uncurated name rather than landing data
+//! on the wrong kind. Every string below was verified against Apple's
+//! `HKQuantityTypeIdentifier` reference and against real `export.xml` files
+//! (note the acronym casing: `VO2Max`, `SDNN`).
+
+use crate::entities::daily_metric::MetricKind;
+
+/// The `type` attribute of a sleep record; its stage lives in `value`.
+pub(crate) const HK_SLEEP_ANALYSIS: &str = "HKCategoryTypeIdentifierSleepAnalysis";
+
+/// How an `export.xml` `type` attribute is classified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HkMapping {
+    /// A quantity name → one [`MetricKind`], aggregated per local day.
+    Curated(MetricKind),
+    /// `HKCategoryTypeIdentifierSleepAnalysis` → timed segments, folded per
+    /// stage per night on a separate path.
+    Sleep,
+    /// Seen and deliberately not tracked — silently ignored, which is what
+    /// keeps quarantine exceptional (ADR-0005 §4).
+    Excluded,
+    /// Never mapped → quarantined, never dropped.
+    Unknown,
+}
+
+/// The curated vocabulary, carrying the `export.xml` spelling, the HAE spelling
+/// and the shared [`MetricKind`] in one row so the two intake paths cannot
+/// drift apart. Adding a metric means adding one row here and one arm to
+/// `map_hae_name`; the agreement test fails until both exist.
+///
+/// The HAE spelling is `None` where that intake has **no 1:1 counterpart** —
+/// not where one merely hasn't been added. HAE models blood pressure as a
+/// single `blood_pressure` metric carrying `systolic` and `diastolic` fields
+/// per data point (verified against its published JSON format), the same
+/// 1-to-many shape as `sleep_analysis`, so no HAE *name* maps to either blood
+/// pressure kind. Inventing `blood_pressure_systolic` here would make the
+/// agreement test green while guaranteeing nothing, since HAE never sends it.
+pub(crate) const HK_METRICS: &[(&str, Option<&str>, MetricKind)] = &[
+    (
+        "HKQuantityTypeIdentifierBodyMass",
+        Some("weight_body_mass"),
+        MetricKind::Weight,
+    ),
+    (
+        "HKQuantityTypeIdentifierBodyFatPercentage",
+        Some("body_fat_percentage"),
+        MetricKind::BodyFat,
+    ),
+    (
+        "HKQuantityTypeIdentifierVO2Max",
+        Some("vo2_max"),
+        MetricKind::Vo2Max,
+    ),
+    (
+        "HKQuantityTypeIdentifierRestingHeartRate",
+        Some("resting_heart_rate"),
+        MetricKind::RestingHeartRate,
+    ),
+    (
+        "HKQuantityTypeIdentifierHeartRate",
+        Some("heart_rate"),
+        MetricKind::HeartRate,
+    ),
+    (
+        "HKQuantityTypeIdentifierHeartRateVariabilitySDNN",
+        Some("heart_rate_variability"),
+        MetricKind::Hrv,
+    ),
+    (
+        "HKQuantityTypeIdentifierOxygenSaturation",
+        Some("blood_oxygen_saturation"),
+        MetricKind::Spo2,
+    ),
+    (
+        "HKQuantityTypeIdentifierAppleSleepingBreathingDisturbances",
+        Some("breathing_disturbances"),
+        MetricKind::BreathingDisturbances,
+    ),
+    (
+        "HKQuantityTypeIdentifierRespiratoryRate",
+        Some("respiratory_rate"),
+        MetricKind::RespiratoryRate,
+    ),
+    (
+        "HKQuantityTypeIdentifierHeartRateRecoveryOneMinute",
+        Some("cardio_recovery"),
+        MetricKind::CardioRecovery,
+    ),
+    // Blood pressure has no HAE counterpart NAME — see the table docs above.
+    // In `export.xml` these arrive as ordinary `<Record>` elements nested
+    // inside a `<Correlation>`, which the parser already walks into.
+    (
+        "HKQuantityTypeIdentifierBloodPressureSystolic",
+        None,
+        MetricKind::BloodPressureSystolic,
+    ),
+    (
+        "HKQuantityTypeIdentifierBloodPressureDiastolic",
+        None,
+        MetricKind::BloodPressureDiastolic,
+    ),
+    (
+        "HKQuantityTypeIdentifierActiveEnergyBurned",
+        Some("active_energy"),
+        MetricKind::ActiveEnergy,
+    ),
+    (
+        "HKQuantityTypeIdentifierStepCount",
+        Some("step_count"),
+        MetricKind::Steps,
+    ),
+    (
+        "HKQuantityTypeIdentifierAppleExerciseTime",
+        Some("apple_exercise_time"),
+        MetricKind::ExerciseMinutes,
+    ),
+    (
+        "HKQuantityTypeIdentifierDistanceWalkingRunning",
+        Some("walking_running_distance"),
+        MetricKind::WalkingDistance,
+    ),
+    (
+        "HKQuantityTypeIdentifierAppleStandTime",
+        Some("apple_stand_time"),
+        MetricKind::StandMinutes,
+    ),
+    // HAE lists this as a standalone "Flights Climbed" activity metric; the
+    // snake_case spelling follows its convention for the other 19 but could not
+    // be confirmed against a published payload. A wrong guess here is
+    // benign-and-loud, not silently wrong: HAE's real name would still
+    // quarantine and show up by name in the ingest log.
+    (
+        "HKQuantityTypeIdentifierFlightsClimbed",
+        Some("flights_climbed"),
+        MetricKind::FlightsClimbed,
+    ),
+    (
+        "HKQuantityTypeIdentifierWalkingSpeed",
+        Some("walking_speed"),
+        MetricKind::WalkingSpeed,
+    ),
+    (
+        "HKQuantityTypeIdentifierWalkingAsymmetryPercentage",
+        Some("walking_asymmetry_percentage"),
+        MetricKind::GaitAsymmetry,
+    ),
+    (
+        "HKQuantityTypeIdentifierWalkingDoubleSupportPercentage",
+        Some("walking_double_support_percentage"),
+        MetricKind::GaitDoubleSupport,
+    ),
+    (
+        "HKQuantityTypeIdentifierWalkingStepLength",
+        Some("walking_step_length"),
+        MetricKind::StepLength,
+    ),
+];
+
+/// `export.xml` names we have seen and deliberately do not curate, paired with
+/// the [`EXCLUDED_HAE_NAMES`](crate::services::metrics::EXCLUDED_HAE_NAMES)
+/// spelling of the same metric.
+///
+/// Paired for the same reason [`HK_METRICS`] is: a list of two independent
+/// name sets can drift onto entirely different metrics while every count-based
+/// check still passes. Pairing makes the correspondence the thing under test.
+///
+/// This list is what keeps quarantine *exceptional* on the backfill path:
+/// `BasalEnergyBurned` alone contributes hundreds of thousands of records to a
+/// decade of history, and without an explicit decline it would dominate the
+/// import report and bury genuinely new names.
+pub(crate) const EXCLUDED_HK_NAMES: &[(&str, &str)] = &[
+    ("HKCategoryTypeIdentifierAppleStandHour", "apple_stand_hour"),
+    (
+        "HKQuantityTypeIdentifierBasalEnergyBurned",
+        "basal_energy_burned",
+    ),
+    ("HKQuantityTypeIdentifierPhysicalEffort", "physical_effort"),
+    (
+        "HKQuantityTypeIdentifierAppleSleepingWristTemperature",
+        "apple_sleeping_wrist_temperature",
+    ),
+    ("HKQuantityTypeIdentifierTimeInDaylight", "time_in_daylight"),
+    (
+        "HKQuantityTypeIdentifierWalkingHeartRateAverage",
+        "walking_heart_rate_average",
+    ),
+    (
+        "HKQuantityTypeIdentifierEnvironmentalAudioExposure",
+        "environmental_audio_exposure",
+    ),
+    (
+        "HKQuantityTypeIdentifierHeadphoneAudioExposure",
+        "headphone_audio_exposure",
+    ),
+];
+
+/// Classify an `export.xml` `type` attribute into curated / sleep / excluded /
+/// unknown.
+pub(crate) fn map_hk_name(name: &str) -> HkMapping {
+    if name == HK_SLEEP_ANALYSIS {
+        return HkMapping::Sleep;
+    }
+    if let Some((_, _, kind)) = HK_METRICS.iter().find(|(hk, _, _)| *hk == name) {
+        return HkMapping::Curated(*kind);
+    }
+    if EXCLUDED_HK_NAMES.iter().any(|(hk, _)| *hk == name) {
+        return HkMapping::Excluded;
+    }
+    HkMapping::Unknown
+}
+
+/// Every `export.xml` name this path recognizes — curated, sleep, or
+/// deliberately excluded. Used to sweep stale quarantine rows once a name is
+/// promoted (a re-run must not leave the old row advertising it as unhandled).
+pub(crate) fn is_recognized_hk_name(name: &str) -> bool {
+    !matches!(map_hk_name(name), HkMapping::Unknown)
+}
+
+/// Which sleep sub-metrics one `HKCategoryValueSleepAnalysis*` segment feeds.
+///
+/// Apple emits no "total sleep" segment, so [`MetricKind::SleepTotal`] is
+/// *derived*: every asleep-class stage also contributes to a combined asleep
+/// interval set, whose union becomes the night's total. `Awake` and `InBed` are
+/// deliberately excluded from that union — they are not sleep.
+///
+/// Two undifferentiated spellings exist and both must be handled: pre-iOS-16
+/// exports carry `…Asleep`, iOS 16+ carries `…AsleepUnspecified`. Neither has a
+/// stage breakdown, so they feed the total alone — a decade of history has
+/// years of each. Returns `(stage_kind, counts_as_asleep)`.
+pub(crate) fn map_sleep_stage(value: &str) -> Option<(Option<MetricKind>, bool)> {
+    match value {
+        "HKCategoryValueSleepAnalysisInBed" => Some((Some(MetricKind::TimeInBed), false)),
+        "HKCategoryValueSleepAnalysisAwake" => Some((Some(MetricKind::SleepAwake), false)),
+        "HKCategoryValueSleepAnalysisAsleepCore" => Some((Some(MetricKind::SleepCore), true)),
+        "HKCategoryValueSleepAnalysisAsleepDeep" => Some((Some(MetricKind::SleepDeep), true)),
+        "HKCategoryValueSleepAnalysisAsleepREM" => Some((Some(MetricKind::SleepRem), true)),
+        // Undifferentiated: contributes to the total, but has no stage row.
+        "HKCategoryValueSleepAnalysisAsleep" | "HKCategoryValueSleepAnalysisAsleepUnspecified" => {
+            Some((None, true))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::strum::IntoEnumIterator as _;
+
+    use super::{
+        EXCLUDED_HK_NAMES, HK_METRICS, HK_SLEEP_ANALYSIS, HkMapping, is_recognized_hk_name,
+        map_hk_name, map_sleep_stage,
+    };
+    use crate::{
+        entities::daily_metric::MetricKind,
+        services::metrics::{CURATED_HAE_NAMES, EXCLUDED_HAE_NAMES, HaeMapping, map_hae_name},
+    };
+
+    /// The whole point of the shared table: a reading that arrives by backfill
+    /// and the same reading arriving by live HAE push must land on one kind.
+    #[test]
+    fn hk_and_hae_names_agree() {
+        for (hk, hae, kind) in HK_METRICS {
+            assert_eq!(
+                map_hk_name(hk),
+                HkMapping::Curated(*kind),
+                "{hk} must map to {kind:?}"
+            );
+            let Some(hae) = hae else { continue };
+            assert!(
+                matches!(map_hae_name(hae), HaeMapping::Curated(k) if k == *kind),
+                "HAE name {hae} disagrees with export.xml name {hk} (expected {kind:?})"
+            );
+        }
+    }
+
+    /// `None` means the live path genuinely has no route to that kind, not that
+    /// someone forgot to fill it in — so assert the absence rather than
+    /// skipping. If an HAE name is ever mapped to a blood pressure kind (the
+    /// right fix being to explode `blood_pressure` the way `sleep_analysis` is
+    /// exploded), this fails until the table is updated to match.
+    #[test]
+    fn kinds_without_an_hae_name_are_genuinely_unreachable_from_the_live_path() {
+        let unpaired: Vec<MetricKind> = HK_METRICS
+            .iter()
+            .filter(|(_, hae, _)| hae.is_none())
+            .map(|(_, _, kind)| *kind)
+            .collect();
+        assert_eq!(
+            unpaired,
+            vec![
+                MetricKind::BloodPressureSystolic,
+                MetricKind::BloodPressureDiastolic
+            ],
+            "only blood pressure is expected to lack an HAE counterpart"
+        );
+
+        // Exhaustive over the ENTIRE live vocabulary, not just over the names
+        // this table happens to repeat back: an arm added to the HAE side alone
+        // would otherwise sail past, which is exactly the drift being guarded
+        // against.
+        for (hae, kind) in CURATED_HAE_NAMES {
+            assert!(
+                !unpaired.contains(kind),
+                "the live path now maps {hae} to {kind:?}, but HK_METRICS still declares that \
+                 kind has no HAE counterpart — explode `blood_pressure` into both kinds and pair \
+                 them here, or the two intakes disagree"
+            );
+        }
+    }
+
+    /// A future `MetricKind` must not be silently unreachable from the
+    /// backfill: every non-sleep kind needs exactly one export.xml spelling.
+    #[test]
+    fn every_non_sleep_kind_is_mapped_exactly_once() {
+        for kind in MetricKind::iter() {
+            let hits = HK_METRICS.iter().filter(|(_, _, k)| *k == kind).count();
+            let expected = usize::from(!is_sleep_kind(kind));
+            assert_eq!(
+                hits, expected,
+                "{kind:?} appears {hits} times in HK_METRICS, expected {expected}"
+            );
+        }
+    }
+
+    fn is_sleep_kind(kind: MetricKind) -> bool {
+        matches!(
+            kind,
+            MetricKind::SleepTotal
+                | MetricKind::SleepDeep
+                | MetricKind::SleepRem
+                | MetricKind::SleepCore
+                | MetricKind::SleepAwake
+                | MetricKind::TimeInBed
+        )
+    }
+
+    /// Equal length alone would pass with the two lists declining entirely
+    /// different metrics, so assert the correspondence itself: each pair's HAE
+    /// spelling must be the one the live path declines.
+    #[test]
+    fn excluded_hk_mirrors_excluded_hae() {
+        assert_eq!(
+            EXCLUDED_HK_NAMES.len(),
+            EXCLUDED_HAE_NAMES.len(),
+            "the two exclude lists must stay in lockstep"
+        );
+        for (hk, hae) in EXCLUDED_HK_NAMES {
+            assert_eq!(map_hk_name(hk), HkMapping::Excluded, "{hk}");
+            assert!(
+                EXCLUDED_HAE_NAMES.contains(hae),
+                "{hk} is declined on the backfill path but its HAE counterpart {hae} is not \
+                 declined on the live path"
+            );
+            assert!(
+                matches!(map_hae_name(hae), HaeMapping::Excluded),
+                "{hae} must classify as excluded, not curated or unknown"
+            );
+        }
+    }
+
+    #[test]
+    fn sleep_and_unknown_classify() {
+        assert_eq!(map_hk_name(HK_SLEEP_ANALYSIS), HkMapping::Sleep);
+        assert_eq!(
+            map_hk_name("HKQuantityTypeIdentifierDietaryWater"),
+            HkMapping::Unknown
+        );
+        assert!(is_recognized_hk_name("HKQuantityTypeIdentifierBodyMass"));
+        assert!(is_recognized_hk_name(HK_SLEEP_ANALYSIS));
+        assert!(is_recognized_hk_name(
+            "HKQuantityTypeIdentifierBasalEnergyBurned"
+        ));
+        assert!(!is_recognized_hk_name(
+            "HKQuantityTypeIdentifierDietaryWater"
+        ));
+    }
+
+    /// Both the modern stage spellings and the pre-iOS-16 undifferentiated one
+    /// must resolve — a decade of history contains years of each.
+    #[test]
+    fn sleep_stages_map_including_legacy_spellings() {
+        assert_eq!(
+            map_sleep_stage("HKCategoryValueSleepAnalysisAsleepDeep"),
+            Some((Some(MetricKind::SleepDeep), true))
+        );
+        assert_eq!(
+            map_sleep_stage("HKCategoryValueSleepAnalysisAsleepREM"),
+            Some((Some(MetricKind::SleepRem), true))
+        );
+        assert_eq!(
+            map_sleep_stage("HKCategoryValueSleepAnalysisInBed"),
+            Some((Some(MetricKind::TimeInBed), false)),
+            "in-bed is not sleep and must not feed the total"
+        );
+        assert_eq!(
+            map_sleep_stage("HKCategoryValueSleepAnalysisAwake"),
+            Some((Some(MetricKind::SleepAwake), false)),
+            "awake is not sleep and must not feed the total"
+        );
+        for legacy in [
+            "HKCategoryValueSleepAnalysisAsleep",
+            "HKCategoryValueSleepAnalysisAsleepUnspecified",
+        ] {
+            assert_eq!(
+                map_sleep_stage(legacy),
+                Some((None, true)),
+                "{legacy} counts toward the total with no stage row"
+            );
+        }
+        assert_eq!(map_sleep_stage("HKCategoryValueSleepAnalysisFuture"), None);
+    }
+}

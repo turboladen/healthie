@@ -28,10 +28,27 @@ pub struct Model {
     pub updated_at: DateTimeUtc,
 }
 
-/// Closed vocabulary of curated metrics (ADR-0003 style). 25 variants: 19
+/// Closed vocabulary of curated metrics (ADR-0003 style). 28 variants: 22
 /// scalar/aggregate kinds plus 6 sleep sub-metrics that `sleep_analysis`
 /// explodes into. `MetricKind::iter()` enumerates the legal values.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
+///
+/// `Hash`/`Ord` exist for the Apple Health backfill, which keys its per-day
+/// rollup accumulator on `(MetricKind, NaiveDate)` and orders its report by
+/// kind. `Ord` follows declaration order, which reads sensibly in that report.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    EnumIter,
+    DeriveActiveEnum,
+    Serialize,
+    Deserialize,
+)]
 #[sea_orm(rs_type = "String", db_type = "Text")]
 pub enum MetricKind {
     #[sea_orm(string_value = "weight")]
@@ -64,6 +81,14 @@ pub enum MetricKind {
     #[sea_orm(string_value = "cardio-recovery")]
     #[serde(rename = "cardio-recovery")]
     CardioRecovery,
+    /// Stored as its own row; the systolic/diastolic *pairing* is not modeled
+    /// — see ADR-0006 §2.
+    #[sea_orm(string_value = "blood-pressure-systolic")]
+    #[serde(rename = "blood-pressure-systolic")]
+    BloodPressureSystolic,
+    #[sea_orm(string_value = "blood-pressure-diastolic")]
+    #[serde(rename = "blood-pressure-diastolic")]
+    BloodPressureDiastolic,
     #[sea_orm(string_value = "active-energy")]
     #[serde(rename = "active-energy")]
     ActiveEnergy,
@@ -79,6 +104,9 @@ pub enum MetricKind {
     #[sea_orm(string_value = "stand-minutes")]
     #[serde(rename = "stand-minutes")]
     StandMinutes,
+    #[sea_orm(string_value = "flights-climbed")]
+    #[serde(rename = "flights-climbed")]
+    FlightsClimbed,
     #[sea_orm(string_value = "walking-speed")]
     #[serde(rename = "walking-speed")]
     WalkingSpeed,
@@ -127,7 +155,8 @@ impl MetricKind {
             | Self::CardioRecovery
             | Self::RespiratoryRate => "count/min",
             Self::Hrv => "ms",
-            Self::BreathingDisturbances | Self::Steps => "count",
+            Self::BloodPressureSystolic | Self::BloodPressureDiastolic => "mmHg",
+            Self::BreathingDisturbances | Self::Steps | Self::FlightsClimbed => "count",
             Self::ActiveEnergy => "kcal",
             Self::ExerciseMinutes | Self::StandMinutes => "min",
             Self::WalkingDistance => "mi",

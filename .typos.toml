@@ -1,5 +1,12 @@
 # typos-cli config — enforced by CI's `typos` job and `just typos`.
 
+[default]
+# US English everywhere, enforced rather than remembered. Prose in this repo is
+# written by both a human and LLM agents, and agents drift toward UK spellings
+# unprompted ("behaviour", "normalise", "judgement") — a review comment fixes one
+# instance, this fixes the class. Applies to docs, comments and identifiers alike.
+locale = "en-us"
+
 [default.extend-words]
 # Project/domain vocabulary, not typos:
 hae = "hae" # Health Auto Export (iOS app); /ingest/hae endpoint

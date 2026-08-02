@@ -4,6 +4,7 @@
 //! [`api::router`] through `tower::oneshot` without binding a socket.
 
 pub mod api;
+pub mod apple_health;
 pub mod config;
 
 use sea_orm::DatabaseConnection;
