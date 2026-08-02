@@ -27,12 +27,11 @@ use serde_json::{Map, Value};
 use super::{
     accumulate::{Accumulator, Interval, daily_agg},
     mapping::{HkMapping, map_hk_name, map_sleep_stage},
-    units::convert_to_canonical,
 };
 use crate::{
     entities::daily_metric::MetricKind,
     error::{DomainError, DomainResult},
-    services::metrics::parse_local,
+    services::{metrics::parse_local, units::convert_to_canonical},
 };
 
 /// The only element this parser acts on.

@@ -1,12 +1,17 @@
-//! Conversion of `export.xml`'s per-record `unit` attribute to the canonical
-//! unit [`MetricKind::unit`] declares.
+//! Conversion of a declared unit to the canonical one [`MetricKind::unit`]
+//! declares, for **both** intakes.
 //!
-//! Apple stamps every quantity record with the unit it was recorded in, which
-//! varies by device locale and by app: the same `BodyMass` history can carry
-//! `kg` for years and `lb` after a phone was reconfigured. `daily_metric` has
-//! no unit column — the unit is derived from the kind — so a value must be
+//! Every producer stamps its readings with the unit they were recorded in,
+//! which varies by device locale and by app: the same `BodyMass` history can
+//! carry `kg` for years and `lb` after a phone was reconfigured. `daily_metric`
+//! has no unit column — the unit is derived from the kind — so a value must be
 //! converted before it is stored, and a value that *cannot* be converted must
-//! never be stored (ADR-0006 §5).
+//! never be stored (ADR-0006 §5, extended to the live path by ADR-0007).
+//!
+//! This lives beside the two intakes rather than inside either. It arrived with
+//! the `export.xml` backfill and read as that importer's private helper, but
+//! the vocabulary below always described **two** vendors' spellings, and the
+//! live HAE path needs exactly the same refusal.
 //!
 //! # Where the numbers come from
 //!
