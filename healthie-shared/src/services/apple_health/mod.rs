@@ -64,11 +64,15 @@ use sea_orm::{
 use self::{
     accumulate::{Accumulator, PendingRow},
     mapping::{is_recognized_hk_name, map_sleep_stage},
-    parse::{ImportStats, QuarantineReason},
+    parse::ImportStats,
 };
 use crate::{
     clock,
-    entities::{daily_metric, daily_metric::MetricKind, quarantined_metric},
+    entities::{
+        daily_metric,
+        daily_metric::MetricKind,
+        quarantined_metric::{self, QuarantineMeta, QuarantineReason},
+    },
     error::{DomainError, DomainResult},
     services::metrics::{upsert_metric, upsert_quarantine},
 };
@@ -576,11 +580,16 @@ async fn persist_quarantine<C: ConnectionTrait>(
 ) -> DomainResult<()> {
     for (raw_name, sample) in &stats.quarantined {
         let mut point = sample.point.clone();
-        if let Some(meta) = point
-            .get_mut("_import")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            meta.insert("records_seen".to_owned(), sample.records_seen.into());
+        // Created here rather than assumed to exist: `upsert_quarantine` stamps
+        // the reason into this same object and preserves what it finds, so
+        // whichever writes first, both keys survive.
+        if let Some(obj) = point.as_object_mut() {
+            let meta = obj
+                .entry(quarantined_metric::IMPORT_META_KEY)
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            if let Some(meta) = meta.as_object_mut() {
+                meta.insert("records_seen".to_owned(), sample.records_seen.into());
+            }
         }
         // `upsert_quarantine` keys on `(raw_name, date)`, and the retained date
         // is whichever record this run happened to see first. Importing a
@@ -588,7 +597,19 @@ async fn persist_quarantine<C: ConnectionTrait>(
         // *second* row for the same name, quietly breaking the one-row-per-name
         // invariant this path promises. Drop the other dates first.
         drop_other_dates(db, raw_name, sample.date).await?;
-        upsert_quarantine(db, raw_name, sample.date, &point, now).await?;
+        upsert_quarantine(
+            db,
+            raw_name,
+            sample.date,
+            &point,
+            QuarantineMeta {
+                reason: sample.reason,
+                units: sample.units.as_deref(),
+                kinds: &sample.kinds,
+            },
+            now,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -1434,17 +1455,30 @@ mod tests {
             .await
             .expect("seed quarantine");
         }
-        // HAE vocabulary: the backfill's sweep must never reach it.
-        quarantined_metric::ActiveModel {
-            raw_name: Set("some_future_hae_metric".to_owned()),
-            date: Set(date("2026-07-01")),
-            raw_point: Set(serde_json::json!({ "qty": 1.0 })),
-            created_at: Set(now),
-            ..Default::default()
+        // HAE vocabulary: the backfill's sweep must never reach it. Both shapes
+        // the live path writes are seeded, including the hardest case — a
+        // CURATED HAE name whose `HK` counterpart this build does recognize,
+        // quarantined over a value rather than over its name. Nothing about
+        // "the name is now handled" is true of it, and the only thing standing
+        // between it and deletion is the vocabulary scope.
+        for (raw_name, reason) in [
+            ("some_future_hae_metric", "unknown-type"),
+            ("weight_body_mass", "implausible-value"),
+        ] {
+            quarantined_metric::ActiveModel {
+                raw_name: Set(raw_name.to_owned()),
+                date: Set(date("2026-07-01")),
+                raw_point: Set(serde_json::json!({
+                    "qty": 1.0,
+                    "_import": { "reason": reason },
+                })),
+                created_at: Set(now),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .expect("seed HAE quarantine");
         }
-        .insert(&db)
-        .await
-        .expect("seed HAE quarantine");
 
         let report = import(&db, FIXTURE).await;
         assert_eq!(report.stale_quarantine_cleared, 2);
@@ -1459,6 +1493,11 @@ mod tests {
         assert!(
             names.contains(&"some_future_hae_metric".to_owned()),
             "the HK-prefix scope must leave HAE rows alone"
+        );
+        assert!(
+            names.contains(&"weight_body_mass".to_owned()),
+            "a live-path row for a curated name must survive: the backfill promoting nothing has \
+             no bearing on a value this build refused"
         );
         assert!(names.contains(&"HKQuantityTypeIdentifierDietaryWater".to_owned()));
         assert!(

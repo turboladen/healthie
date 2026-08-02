@@ -29,7 +29,7 @@ use super::{
     mapping::{HkMapping, map_hk_name, map_sleep_stage},
 };
 use crate::{
-    entities::daily_metric::MetricKind,
+    entities::{daily_metric::MetricKind, quarantined_metric::QuarantineReason},
     error::{DomainError, DomainResult},
     services::{metrics::parse_local, units::convert_to_canonical},
 };
@@ -41,62 +41,6 @@ const RECORD: &[u8] = b"Record";
 /// not look hung.
 const PROGRESS_EVERY: u64 = 1_000_000;
 
-/// Why a record could not be stored, recorded in `raw_point._import.reason`.
-///
-/// A closed vocabulary, so an enum rather than bare string literals: the
-/// spellings are written here and read back in
-/// [`clear_promoted_quarantine`](super::clear_promoted_quarantine), and a typo
-/// on either side would silently disable the quarantine sweep — a failure with
-/// no symptom other than a stale row nobody looks at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum QuarantineReason {
-    /// The `type` attribute is not in the curated vocabulary.
-    UnknownType,
-    /// A `HKCategoryValueSleepAnalysis*` spelling we do not know.
-    UnknownSleepStage,
-    /// Curated name, but the record carried no `unit` at all.
-    MissingUnit,
-    /// Curated name, but no conversion covers its `unit`.
-    UnconvertibleUnit,
-}
-
-impl QuarantineReason {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::UnknownType => "unknown-type",
-            Self::UnknownSleepStage => "unknown-sleep-stage",
-            Self::MissingUnit => "missing-unit",
-            Self::UnconvertibleUnit => "unconvertible-unit",
-        }
-    }
-
-    /// Parse a reason back out of a stored row. `None` for anything this build
-    /// does not recognize — rows written by some future build must not be
-    /// mistaken for one of ours and swept.
-    pub(crate) fn parse(raw: &str) -> Option<Self> {
-        [
-            Self::UnknownType,
-            Self::UnknownSleepStage,
-            Self::MissingUnit,
-            Self::UnconvertibleUnit,
-        ]
-        .into_iter()
-        .find(|reason| reason.as_str() == raw)
-    }
-
-    /// Whether this reason describes the *name*, and so stops applying the
-    /// moment that name joins the vocabulary.
-    ///
-    /// Deliberately not every reason: a curated metric can also be quarantined
-    /// because one record carried an unconvertible or missing unit, and those
-    /// rows describe a live data problem that promoting the name does nothing
-    /// about. Sweeping them would erase a standing complaint just because the
-    /// metric happens to be curated.
-    pub(crate) fn is_name_based(self) -> bool {
-        matches!(self, Self::UnknownType | Self::UnknownSleepStage)
-    }
-}
-
 /// One retained example of an uncurated name, plus how often it was seen.
 ///
 /// Deliberately one sample per name rather than one row per `(name, date)` as
@@ -106,6 +50,14 @@ pub(crate) struct QuarantineSample {
     pub(crate) records_seen: u64,
     pub(crate) date: NaiveDate,
     pub(crate) point: Value,
+    /// Why this name's records could not be stored. Carried here rather than
+    /// baked into `point`, so `upsert_quarantine` stays the single writer of
+    /// the `_import` marker.
+    pub(crate) reason: QuarantineReason,
+    /// The unit the refused records declared, when they had one.
+    pub(crate) units: Option<String>,
+    /// The kind the records would have landed on; empty for an unknown name.
+    pub(crate) kinds: Vec<MetricKind>,
 }
 
 /// Counts and discoveries from one pass over the file.
@@ -240,9 +192,10 @@ impl<'a> RawRecord<'a> {
         Some(rec)
     }
 
-    /// The record verbatim, for quarantine. `reason` records why we could not
-    /// store it; `records_seen` is filled in at persist time.
-    fn to_json(&self, reason: QuarantineReason) -> Value {
+    /// The record verbatim, for quarantine. The `_import` marker — reason,
+    /// declared units, kinds — is stamped by `upsert_quarantine`, the single
+    /// writer of it; `records_seen` is filled in at persist time.
+    fn to_json(&self) -> Value {
         let mut map = Map::new();
         for (key, val) in [
             ("type", &self.ty),
@@ -256,12 +209,6 @@ impl<'a> RawRecord<'a> {
                 map.insert(key.to_owned(), Value::String(v.clone().into_owned()));
             }
         }
-        let mut meta = Map::new();
-        meta.insert(
-            "reason".to_owned(),
-            Value::String(reason.as_str().to_owned()),
-        );
-        map.insert("_import".to_owned(), Value::Object(meta));
         Value::Object(map)
     }
 }
@@ -318,12 +265,13 @@ fn fold_quantity(
     // No unit means no way to know what the number means. Quarantine rather
     // than assume it was already canonical.
     let Some(unit) = rec.unit.as_deref() else {
-        quarantine(
+        quarantine_for_kind(
             stats,
             ty,
             QuarantineReason::MissingUnit,
             rec,
             start.date_naive(),
+            Some(kind),
         );
         return;
     };
@@ -332,12 +280,13 @@ fn fold_quantity(
             .unconvertible
             .entry((ty.to_owned(), unit.to_owned()))
             .or_insert(0) += 1;
-        quarantine(
+        quarantine_for_kind(
             stats,
             ty,
             QuarantineReason::UnconvertibleUnit,
             rec,
             start.date_naive(),
+            Some(kind),
         );
         return;
     };
@@ -401,13 +350,30 @@ fn quarantine(
     rec: &RawRecord<'_>,
     date: NaiveDate,
 ) {
+    quarantine_for_kind(stats, name, reason, rec, date, None);
+}
+
+/// [`quarantine`] for a refusal that already knows which curated kind the
+/// record would have landed on — a unit this build cannot convert, or a number
+/// the kind cannot physically take.
+fn quarantine_for_kind(
+    stats: &mut ImportStats,
+    name: &str,
+    reason: QuarantineReason,
+    rec: &RawRecord<'_>,
+    date: NaiveDate,
+    kind: Option<MetricKind>,
+) {
     let entry = stats
         .quarantined
         .entry(name.to_owned())
         .or_insert_with(|| QuarantineSample {
             records_seen: 0,
             date,
-            point: rec.to_json(reason),
+            point: rec.to_json(),
+            reason,
+            units: rec.unit.as_deref().map(str::to_owned),
+            kinds: kind.into_iter().collect(),
         });
     entry.records_seen += 1;
 }
@@ -591,7 +557,11 @@ mod tests {
             "the first sighting is retained"
         );
         assert_eq!(sample.point["value"], "240");
-        assert_eq!(sample.point["_import"]["reason"], "unknown-type");
+        assert_eq!(sample.reason, QuarantineReason::UnknownType);
+        assert!(
+            sample.kinds.is_empty(),
+            "an unrecognized name has no kind to name"
+        );
     }
 
     /// A unit we cannot convert must never be stored as if it were canonical.
@@ -611,10 +581,14 @@ mod tests {
             )],
             1
         );
+        let sample = &stats.quarantined["HKQuantityTypeIdentifierBodyMass"];
+        assert_eq!(sample.reason, QuarantineReason::UnconvertibleUnit);
         assert_eq!(
-            stats.quarantined["HKQuantityTypeIdentifierBodyMass"].point["_import"]["reason"],
-            "unconvertible-unit"
+            sample.units.as_deref(),
+            Some("mmHg"),
+            "the unit that could not be converted is what a fix needs"
         );
+        assert_eq!(sample.kinds, vec![MetricKind::Weight]);
     }
 
     /// Stone is a real mass unit some locales export, and it converts — this
@@ -666,10 +640,9 @@ mod tests {
             </HealthData>"#,
         );
         assert!(rows.is_empty());
-        assert_eq!(
-            stats.quarantined["HKQuantityTypeIdentifierBodyMass"].point["_import"]["reason"],
-            "missing-unit"
-        );
+        let sample = &stats.quarantined["HKQuantityTypeIdentifierBodyMass"];
+        assert_eq!(sample.reason, QuarantineReason::MissingUnit);
+        assert_eq!(sample.units, None);
     }
 
     /// Excluded names keep quarantine exceptional: seen, declined, silent.

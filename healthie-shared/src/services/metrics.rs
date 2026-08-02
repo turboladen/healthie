@@ -15,7 +15,7 @@ use crate::{
     clock,
     entities::{
         daily_metric::{self, MetricKind},
-        quarantined_metric,
+        quarantined_metric::{self, QuarantineMeta, QuarantineReason},
     },
     error::DomainResult,
 };
@@ -179,7 +179,19 @@ pub async fn ingest_hae<C: ConnectionTrait + TransactionTrait>(
                     let Some(date) = point_date(point) else {
                         continue;
                     };
-                    upsert_quarantine(&txn, &metric.name, date, point, now).await?;
+                    upsert_quarantine(
+                        &txn,
+                        &metric.name,
+                        date,
+                        point,
+                        QuarantineMeta {
+                            reason: QuarantineReason::UnknownType,
+                            units: metric.units.as_deref(),
+                            kinds: &[],
+                        },
+                        now,
+                    )
+                    .await?;
                     track_range(&mut min_date, &mut max_date, date);
                     any = true;
                 }
@@ -331,13 +343,21 @@ pub(crate) async fn upsert_metric<C: ConnectionTrait>(
 
 /// Upsert one `quarantined_metric` row on `(raw_name, date)`, overwriting the
 /// verbatim point last-write-wins.
+///
+/// `meta` is stamped into the point's `_import` object here rather than by the
+/// caller, so a quarantine row with no recorded reason is unconstructible —
+/// which matters now that a *curated* name can land here and the row is the
+/// only thing that says why.
 pub(crate) async fn upsert_quarantine<C: ConnectionTrait>(
     db: &C,
     raw_name: &str,
     date: NaiveDate,
     point: &serde_json::Value,
+    meta: QuarantineMeta<'_>,
     now: DateTime<Utc>,
 ) -> DomainResult<()> {
+    let mut point = point.clone();
+    meta.stamp(&mut point);
     let existing = quarantined_metric::Entity::find()
         .filter(quarantined_metric::Column::RawName.eq(raw_name))
         .filter(quarantined_metric::Column::Date.eq(date))
@@ -346,14 +366,14 @@ pub(crate) async fn upsert_quarantine<C: ConnectionTrait>(
     match existing {
         Some(row) => {
             let mut active: quarantined_metric::ActiveModel = row.into();
-            active.raw_point = Set(point.clone());
+            active.raw_point = Set(point);
             active.update(db).await?;
         }
         None => {
             quarantined_metric::ActiveModel {
                 raw_name: Set(raw_name.to_owned()),
                 date: Set(date),
-                raw_point: Set(point.clone()),
+                raw_point: Set(point),
                 created_at: Set(now),
                 ..Default::default()
             }
