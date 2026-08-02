@@ -179,3 +179,80 @@ async fn mcp_endpoint_is_mounted_and_guarded() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+/// The wire cannot carry a non-finite number, and the finite guard in
+/// `services::metrics` rests on that.
+///
+/// `serde_json` rejects a float that overflows to infinity at parse
+/// (`ErrorCode::NumberOutOfRange`) and `Number::from_f64` refuses to build a
+/// non-finite `Value` at all, so a NaN or an infinity cannot reach `ingest_hae`
+/// through HTTP — the request fails deserialization first. That makes the
+/// guard defense in depth rather than a live fix, and this is what pins the
+/// claim: if a future `serde_json`, or the `arbitrary_precision` feature, ever
+/// makes it representable, this test fails and the guard's status changes from
+/// belt-and-braces to load-bearing.
+#[tokio::test]
+async fn a_non_finite_value_cannot_cross_the_wire() {
+    let (app, token, db) = app_with_ingest_token().await;
+    let body = r#"{"data":{"metrics":[{"name":"weight_body_mass","units":"lb",
+        "data":[{"date":"2026-07-28 00:00:00 -0700","qty":1e999}]}]}}"#;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ingest/hae")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // 400 rather than 422: `NumberOutOfRange` is raised by the *tokenizer*, so
+    // axum classifies it as malformed JSON rather than as valid JSON of the
+    // wrong shape. Either way the handler never runs.
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "an overflowing float must be refused by the extractor, not stored"
+    );
+
+    assert!(
+        <healthie_shared::entities::daily_metric::Entity as sea_orm::EntityTrait>::find()
+            .all(&db)
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing may reach daily_metric from a payload that never parsed"
+    );
+}
+
+/// healthie-ei8 end to end: the conversion is not merely a service-level unit
+/// test, it holds across the real HTTP → extractor → service → commit path.
+#[tokio::test]
+async fn a_kg_declared_weight_is_converted_over_http() {
+    let (app, token, db) = app_with_ingest_token().await;
+    let payload = serde_json::json!({ "data": { "metrics": [
+        { "name": "weight_body_mass", "units": "kg",
+          "data": [{ "date": "2026-07-28 00:00:00 -0700", "qty": 100.0 }] }
+    ] } });
+
+    let resp = app
+        .oneshot(ingest_req(Some(&token), &payload))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let rows = <healthie_shared::entities::daily_metric::Entity as sea_orm::EntityTrait>::find()
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(
+        (rows[0].value - 220.462_262_184_877_6).abs() < 1e-9,
+        "100 kg must be stored as pounds, got {}",
+        rows[0].value
+    );
+}

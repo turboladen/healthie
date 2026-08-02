@@ -62,12 +62,28 @@ pub async fn hae(
     Json(payload): Json<metrics::HaePayload>,
 ) -> Result<StatusCode, ApiError> {
     let report = metrics::ingest_hae(&state.db, payload).await?;
-    tracing::info!(
-        ingested = report.ingested,
-        quarantined = ?report.quarantined,
-        range = ?report.date_range,
-        "hae ingest",
-    );
+    // A push that refused something is the one an operator needs to see. This
+    // runs unattended every day, so an `info!` line indistinguishable from the
+    // 364 ordinary ones would not be read — and a metric refused on EVERY push
+    // means the live feed changed shape and rows that used to land are now
+    // being held instead. That is the signal `warn` exists for.
+    if report.refused.is_empty() && report.bounds_cleared == 0 {
+        tracing::info!(
+            ingested = report.ingested,
+            quarantined = ?report.quarantined,
+            range = ?report.date_range,
+            "hae ingest",
+        );
+    } else {
+        tracing::warn!(
+            ingested = report.ingested,
+            quarantined = ?report.quarantined,
+            range = ?report.date_range,
+            bounds_cleared = report.bounds_cleared,
+            refused = ?report.refused,
+            "hae ingest refused points — they are held verbatim in quarantined_metric",
+        );
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
