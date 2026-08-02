@@ -57,7 +57,7 @@ impl ActiveModelBehavior for ActiveModel {}
 /// It lives on the entity rather than in either intake because it describes
 /// this row's own content, and both intakes write it. The stored spellings are
 /// **stable**: rows carrying them already exist, and `parse` reads them back.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter)]
 pub enum QuarantineReason {
     /// The metric name (HAE) or `type` attribute (`export.xml`) is not in the
     /// curated vocabulary.
@@ -91,18 +91,14 @@ impl QuarantineReason {
     /// Parse a reason back out of a stored row. `None` for anything this build
     /// does not recognize — rows written by some future build must not be
     /// mistaken for one of ours and swept.
+    ///
+    /// Enumerated rather than hand-listed (ADR-0003): a variant added to the
+    /// enum but forgotten here would be written by one intake and then be
+    /// unparsable to the sweep, with nothing failing to say so.
     #[must_use]
     pub fn parse(raw: &str) -> Option<Self> {
-        [
-            Self::UnknownType,
-            Self::UnknownSleepStage,
-            Self::MissingUnit,
-            Self::UnconvertibleUnit,
-            Self::NonFiniteValue,
-            Self::ImplausibleValue,
-        ]
-        .into_iter()
-        .find(|reason| reason.as_str() == raw)
+        use sea_orm::strum::IntoEnumIterator as _;
+        Self::iter().find(|reason| reason.as_str() == raw)
     }
 
     /// Whether this reason describes the *name*, and so stops applying the
@@ -191,6 +187,52 @@ mod tests {
         entities::quarantined_metric::{self},
         test_support::{date, datetime, test_db},
     };
+
+    /// Every reason must survive the write/read cycle the backfill's sweep
+    /// depends on. Enumerated, so a variant added without a spelling — or with
+    /// one `parse` cannot recognize — fails here rather than silently
+    /// disabling the sweep for that reason.
+    #[test]
+    fn every_reason_round_trips_through_its_stored_spelling() {
+        use sea_orm::strum::IntoEnumIterator as _;
+
+        use crate::entities::quarantined_metric::QuarantineReason;
+
+        let mut seen = std::collections::BTreeSet::new();
+        for reason in QuarantineReason::iter() {
+            let spelling = reason.as_str();
+            assert!(
+                seen.insert(spelling),
+                "{spelling} is used by two reasons — the sweep could not tell them apart"
+            );
+            assert_eq!(
+                QuarantineReason::parse(spelling),
+                Some(reason),
+                "{reason:?} does not survive its own spelling"
+            );
+        }
+        assert_eq!(seen.len(), 6, "a new reason needs a decision here");
+        // Only the two NAME-based reasons may be swept when a name is promoted;
+        // a bad unit or an impossible value is a standing complaint that
+        // promoting the name does nothing about.
+        assert!(QuarantineReason::UnknownType.is_name_based());
+        assert!(QuarantineReason::UnknownSleepStage.is_name_based());
+        for reason in [
+            QuarantineReason::MissingUnit,
+            QuarantineReason::UnconvertibleUnit,
+            QuarantineReason::NonFiniteValue,
+            QuarantineReason::ImplausibleValue,
+        ] {
+            assert!(
+                !reason.is_name_based(),
+                "{reason:?} must survive a promotion"
+            );
+        }
+        assert_eq!(
+            QuarantineReason::parse("something-a-future-build-wrote"),
+            None
+        );
+    }
 
     #[tokio::test]
     async fn quarantined_metric_round_trips_json_and_unique_name_date() {

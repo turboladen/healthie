@@ -92,7 +92,7 @@ impl Producer {
 }
 
 /// The UCUM code for a percentage, in both vocabularies.
-const UCUM_PERCENT: &str = "%";
+pub(crate) const UCUM_PERCENT: &str = "%";
 
 /// Convert `value` from `raw_unit`, as written by `producer`, into `kind`'s
 /// canonical unit.
@@ -182,11 +182,14 @@ fn to_ucum(raw: &str) -> Option<&'static str> {
         "mi/hr" | "mi/h" | "mph" => "[mi_i]/h",
         "km/hr" | "km/h" | "kph" => "km/h",
         "m/s" | "m/sec" => "m/s",
-        // Duration.
+        // Duration. The plural abbreviations are cheap insurance against an
+        // expensive failure: an HAE upgrade writing `hrs` for `sleep_analysis`
+        // would quarantine every sleep stage on every push, indefinitely, and
+        // sleep is what the briefing leans on hardest.
         "ms" => "ms",
-        "s" | "sec" | "second" | "seconds" => "s",
-        "min" | "minute" | "minutes" => "min",
-        "hr" | "h" | "hour" | "hours" => "h",
+        "s" | "sec" | "secs" | "second" | "seconds" => "s",
+        "min" | "mins" | "minute" | "minutes" => "min",
+        "hr" | "hrs" | "h" | "hour" | "hours" => "h",
         // Pressure. Apple writes `mmHg`, which UCUM does not accept.
         "mmhg" => "mm[Hg]",
         // VO2 max: a compound Apple writes several ways.
@@ -238,6 +241,11 @@ mod tests {
             ("mi/h", MetricKind::WalkingSpeed, 1.0),
             ("beats/min", MetricKind::HeartRate, 1.0),
             ("steps", MetricKind::Steps, 1.0),
+            // Plural abbreviations: an unlisted one would quarantine every
+            // sleep stage on every push.
+            ("hrs", MetricKind::SleepTotal, 1.0),
+            ("mins", MetricKind::SleepTotal, 1.0 / 60.0),
+            ("secs", MetricKind::SleepTotal, 1.0 / 3600.0),
         ] {
             let got = convert_to_canonical(spelling, kind, 1.0, Producer::HealthAutoExport)
                 .unwrap_or_else(|| panic!("{spelling} must be in the vocabulary"));

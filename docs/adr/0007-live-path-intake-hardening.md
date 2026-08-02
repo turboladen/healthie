@@ -137,7 +137,8 @@ Uniform across both intakes and across both non-finite and out-of-range values:
 **indistinguishable downstream** from a `Mean`/`Sum`-policy row that legitimately
 has none, and from an HAE aggregate that simply arrived without a `Min`.
 healthie-4lf.2 cannot tell a partial row from a complete one, and nothing on the
-row marks it.
+row marks it. §5 records a second limit of the same shape: a night's stages and
+its total can come from different pushes.
 
 On the import path the bound applies at **two levels**, for different reasons.
 Per _record_, before the fold: excluding an artifact reading is what lets the
@@ -170,6 +171,16 @@ the total and time-in-bed are impossible while deep, REM and core are ordinary
 and informative; refusing the whole point would discard three good rows to
 punish two bad ones.
 
+**The cost of that choice, stated:** because refusal is per stage and writes are
+per `(kind, date)`, a night can end up **mixed**. If day D already holds a
+`sleep-total` of 7.2 from an earlier push, and a re-push carries a 49.877 total
+alongside ordinary deep/REM/core, the total keeps the _old_ push's number while
+the stages take the new one's — one row's worth of night assembled from two
+different accounts, with nothing marking it. healthie-4lf.2 will read them as
+one night. The per-stage rule is still right (the alternative discards good
+rows), but this is a real consequence rather than a hypothetical one, and it
+belongs beside the indistinguishable-cleared-`min` limit in §4.
+
 ### 6. A resolved complaint does not outlive its cause
 
 When a `(raw_name, date)` later stores cleanly, its quarantine row is deleted in
@@ -185,6 +196,15 @@ Outcomes are accumulated per `(raw_name, date)` and resolved **after** the point
 loop rather than inside it. `quarantined_metric` is keyed per `(name, date)`
 while refusals are per point, so writing as we go would let the order of the
 `data` array decide whether a day ends up complained about or swept clean.
+
+Where two points on one key disagree, **severity** decides which is preserved:
+a point that stored nothing outranks one that only lost a bound, because the
+first one's reading exists nowhere else while the second's value is already in
+`daily_metric`. **A same-severity tie is still arrival order** — of two points
+that both stored nothing, the first is kept. That one is not resolvable here:
+one row per key means one of two equally-total losses is unrecoverable whatever
+rule is chosen, and the fix is a finer key (healthie-1ru), not a better
+tie-break.
 
 ### 7. A write is one intake's whole account of a day
 
@@ -206,9 +226,14 @@ nothing on the row to mark it.
 - **Positive:** the two intakes now agree about units, and the identical
   mismatch is no longer fatal-per-record on one path and silent on the other
   while both write the same column.
-- **Positive:** every refusal is durable and recoverable. The live path holds
-  the point verbatim with the unit and reason; the import path's records are
-  still in the file. Nothing this change refuses is lost.
+- **Positive:** every refusal is durable and recoverable, with one bound worth
+  stating precisely. The live path holds the point verbatim with the unit and
+  reason, and the import path's records are still in the file — so the
+  guarantee is **one preserved point per `(raw_name, date)`**, not one per
+  refusal. When several points for one metric on one day are all refused, the
+  single row keeps the most severe and the rest are discarded. HAE sends one
+  point per metric per day, so this is a corner rather than the common case,
+  but "nothing is lost" would be the wrong thing to remember.
 - **Positive:** the risk is instrumented rather than assumed. Ingest logs at
   `warn` when a push refused anything, so a metric that starts failing on every
   push is visible on the first unattended day rather than discovered in a trend

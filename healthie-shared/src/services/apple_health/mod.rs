@@ -1525,11 +1525,15 @@ mod tests {
             .expect("seed quarantine");
         }
         // HAE vocabulary: the backfill's sweep must never reach it. Both shapes
-        // the live path writes are seeded, including the hardest case — a
-        // CURATED HAE name whose `HK` counterpart this build does recognize,
-        // quarantined over a value rather than over its name. Nothing about
-        // "the name is now handled" is true of it, and the only thing standing
-        // between it and deletion is the vocabulary scope.
+        // the live path writes are seeded, including a CURATED HAE name whose
+        // `HK` counterpart this build does recognize, quarantined over a value
+        // rather than over its name — nothing about "the name is now handled"
+        // is true of it.
+        //
+        // Both are stopped by the `HK` prefix scope before the reason is ever
+        // consulted, so this pins the OUTER guard rather than the inner one.
+        // That is the guard worth pinning: it is what the two-vocabulary
+        // arrangement rests on until healthie-1ru adds a real discriminator.
         for (raw_name, reason) in [
             ("some_future_hae_metric", "unknown-type"),
             ("weight_body_mass", "implausible-value"),

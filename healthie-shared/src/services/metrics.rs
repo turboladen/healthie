@@ -30,7 +30,7 @@ use crate::{
     },
     error::DomainResult,
     services::{
-        plausibility,
+        plausibility, units,
         units::{Producer, convert_to_canonical},
     },
 };
@@ -173,14 +173,26 @@ pub struct IngestReport {
     /// deploy: a name appearing here every day means the live feed has changed
     /// shape and rows that used to land are now being held instead.
     pub refused: Vec<Refusal>,
-    /// Rows that stored, but with an `min`/`max` column dropped because that
+    /// Points that stored, but with a `min`/`max` column dropped because that
     /// number alone could not be trusted. The row's `value` is unaffected.
+    ///
+    /// Counted per point, not per column: a point losing both bounds counts
+    /// once, because what it describes is a reading whose spread was partly
+    /// untrustworthy, not how many columns went empty.
     pub bounds_cleared: usize,
     /// Standing quarantine rows deleted because their `(name, date)` stored
     /// cleanly this time. Reported because this push DELETES those rows, and a
     /// run that silently retired forty complaints should not look identical to
     /// one that retired none.
     pub quarantine_retired: usize,
+    /// Points carrying no parseable `date`, or neither a `qty` nor an `Avg`.
+    ///
+    /// These cannot be stored *or* quarantined: `quarantined_metric` is keyed
+    /// on a date, and a point without one has no key. Counting them is
+    /// therefore the only evidence they existed, and this path's whole posture
+    /// is that nothing disappears quietly — the backfill has carried
+    /// `records_skipped` for the same reason since ADR-0006.
+    pub skipped: usize,
 }
 
 /// One curated point that could not be stored as it arrived.
@@ -192,9 +204,14 @@ pub struct Refusal {
     /// The kinds refused. Several when one `sleep_analysis` point explodes and
     /// only some stages were impossible.
     pub kinds: Vec<MetricKind>,
-    /// Whether a row still landed for this `(name, date)` — true when a bound
-    /// was dropped rather than the point refused. A day carrying both outcomes
-    /// reports `true`, because a row is in fact there.
+    /// Whether a row landed **for a refused kind** — true when a bound was
+    /// dropped rather than the point refused outright.
+    ///
+    /// Always `false` on the sleep path, and correctly so: a refused stage
+    /// produces no row of its own, whatever its siblings did. Read it beside
+    /// [`Self::kinds`] — `stored: false` with `kinds: [SleepTotal, TimeInBed]`
+    /// says those two kinds have no row for the day, not that the whole point
+    /// vanished.
     pub stored: bool,
 }
 
@@ -238,7 +255,7 @@ struct Complaint {
 ///
 /// # Errors
 /// Returns [`crate::error::DomainError::Db`] on database errors. Malformed
-/// individual points (missing/unparseable `date`, no usable value) are skipped,
+/// individual points (missing/unparsable `date`, no usable value) are skipped,
 /// not fatal — a partial payload still lands what it can.
 pub async fn ingest_hae<C: ConnectionTrait + TransactionTrait>(
     db: &C,
@@ -275,6 +292,7 @@ struct Ingest {
     /// retire a standing quarantine row.
     settled: BTreeSet<(String, NaiveDate)>,
     bounds_cleared: usize,
+    skipped: usize,
 }
 
 impl Ingest {
@@ -283,6 +301,7 @@ impl Ingest {
         let mut any = false;
         for point in &metric.data {
             let Some(date) = point_date(point) else {
+                self.skipped += 1;
                 continue;
             };
             self.complain(
@@ -309,10 +328,17 @@ impl Ingest {
         now: DateTime<Utc>,
     ) -> DomainResult<()> {
         for point in &metric.data {
+            // A point with no parseable date, or with no number in any shape we
+            // recognize, cannot be stored or even quarantined — the quarantine
+            // row is keyed on a date. Counted, so a producer change that starts
+            // sending an unreadable shape is visible instead of looking like a
+            // quiet day.
             let Some(date) = point_date(point) else {
+                self.skipped += 1;
                 continue;
             };
             let Some((value, min, max)) = scalar_or_aggregate(point) else {
+                self.skipped += 1;
                 continue;
             };
             self.track_range(date);
@@ -333,8 +359,10 @@ impl Ingest {
             };
             warn_if_percent_looks_like_a_fraction(kind, value);
             // A bound we cannot trust is not written, but it does not cost the
-            // day its average: the row lands without it, and the point is
-            // still held verbatim so the dropped number is recoverable.
+            // day its average: the row lands without it, and the point is held
+            // verbatim so the dropped number stays recoverable — unless a
+            // total-loss point on this same `(name, date)` later evicts it,
+            // since the table holds one row per key (see `Complaint`).
             let (min, min_refused) = canonical_bound(units, kind, min);
             let (max, max_refused) = canonical_bound(units, kind, max);
             if let Some(reason) = min_refused.or(max_refused) {
@@ -358,6 +386,7 @@ impl Ingest {
     ) -> DomainResult<()> {
         for point in &metric.data {
             let Some(date) = point_date(point) else {
+                self.skipped += 1;
                 continue;
             };
             let src = point_source(point);
@@ -410,6 +439,7 @@ impl Ingest {
             refused,
             bounds_cleared: self.bounds_cleared,
             quarantine_retired: usize::try_from(quarantine_retired).unwrap_or(usize::MAX),
+            skipped: self.skipped,
         })
     }
 
@@ -559,16 +589,41 @@ fn canonical_bound(
     }
 }
 
-/// The live path's counterpart to the import report's fraction tripwire.
+/// Whether a percent-typed reading looks like an unscaled 0-1 fraction.
 ///
 /// HAE's percent convention is UNVERIFIED (healthie-t58) and
 /// [`Producer::HealthAutoExport`] assumes 0-100, which preserves what this path
-/// did before it converted at all. If that assumption is wrong the stored
-/// number is 100x low and *nothing else notices* — a `0.303` body fat is
-/// comfortably inside every plausibility bound. So say so, on the first push,
-/// where the answer will be sitting in the log.
+/// did before it converted at all. If that assumption is wrong the stored number
+/// is 100x low and *nothing else notices* — a `0.303` body fat is comfortably
+/// inside every plausibility bound.
+///
+/// # Why not every percent kind
+///
+/// [`MetricKind::GaitAsymmetry`] is excluded because a sub-1% asymmetry is an
+/// ordinary reading, not a scale error: the real import holds 243 days at
+/// exactly 0.0, so that distribution is packed against zero and days between 0
+/// and 1 are close to certain. Including it would make this fire on healthy
+/// data, and a detector that cries wolf on a path nobody watches is one whose
+/// output gets filtered — the same false-alarm trap the backfill's day-shift
+/// check was tightened twice to avoid.
+///
+/// The three that remain cannot reach 1.0 honestly: genuine body fat is above
+/// ~3%, blood oxygen above ~70, and `GaitDoubleSupport`'s real span is
+/// 25.9-35.8. Detection is not weakened — a fraction-sending HAE puts body fat
+/// at 0.303 and blood oxygen at 0.985, and both still trip.
+fn percent_looks_like_a_fraction(kind: MetricKind, value: f64) -> bool {
+    matches!(
+        kind,
+        MetricKind::BodyFat | MetricKind::Spo2 | MetricKind::GaitDoubleSupport
+    ) && kind.unit() == units::UCUM_PERCENT
+        && value > 0.0
+        && value <= 1.0
+}
+
+/// Say so on the first push, where the answer to healthie-t58 will be sitting
+/// in the log.
 fn warn_if_percent_looks_like_a_fraction(kind: MetricKind, value: f64) {
-    if kind.unit() == "%" && value > 0.0 && value <= 1.0 {
+    if percent_looks_like_a_fraction(kind, value) {
         tracing::warn!(
             ?kind,
             value,
@@ -763,7 +818,10 @@ pub(crate) async fn upsert_quarantine<C: ConnectionTrait>(
 mod tests {
     use sea_orm::EntityTrait;
 
-    use super::{EXCLUDED_HAE_NAMES, HaeMapping, HaePayload, ingest_hae, map_hae_name, sleep_rows};
+    use super::{
+        EXCLUDED_HAE_NAMES, HaeMapping, HaePayload, ingest_hae, map_hae_name,
+        percent_looks_like_a_fraction, sleep_rows,
+    };
     use crate::{
         entities::{
             daily_metric::{self, MetricKind},
@@ -1005,6 +1063,70 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    /// The sole live-path detector for a 100x error, and the only thing that
+    /// answers healthie-t58 without the device being reachable. It has to fire
+    /// on the real fraction values and stay silent on the real percentage ones
+    /// — a detector that cries wolf gets filtered, and then it answers nothing.
+    #[test]
+    fn the_fraction_tripwire_fires_on_fractions_and_not_on_real_readings() {
+        // What a fraction-sending HAE would actually put on the wire.
+        assert!(percent_looks_like_a_fraction(MetricKind::BodyFat, 0.303));
+        assert!(percent_looks_like_a_fraction(MetricKind::Spo2, 0.985));
+        assert!(percent_looks_like_a_fraction(
+            MetricKind::GaitDoubleSupport,
+            0.259
+        ));
+        // The same readings on the 0-100 scale this build assumes.
+        assert!(!percent_looks_like_a_fraction(MetricKind::BodyFat, 30.3));
+        assert!(!percent_looks_like_a_fraction(MetricKind::Spo2, 98.5));
+        assert!(!percent_looks_like_a_fraction(
+            MetricKind::GaitDoubleSupport,
+            25.9
+        ));
+        // GaitAsymmetry is excluded on purpose: a sub-1% asymmetry is an
+        // ordinary reading. The real import has 243 days at exactly 0.0, so
+        // including this kind would fire on healthy data almost daily.
+        assert!(!percent_looks_like_a_fraction(
+            MetricKind::GaitAsymmetry,
+            0.6
+        ));
+        // And nothing measured in some other unit can reach it at all.
+        assert!(!percent_looks_like_a_fraction(MetricKind::Weight, 0.5));
+        assert!(!percent_looks_like_a_fraction(
+            MetricKind::WalkingDistance,
+            0.9
+        ));
+    }
+
+    /// A point with no date cannot be stored *or* quarantined — the quarantine
+    /// row is keyed on one. Counting it is the only evidence it arrived.
+    #[tokio::test]
+    async fn points_that_can_be_neither_stored_nor_quarantined_are_counted() {
+        let db = test_db().await;
+        let report = ingest_hae(
+            &db,
+            payload(serde_json::json!([
+                { "name": "weight_body_mass", "units": "lb", "data": [
+                    { "qty": 200.0 },
+                    { "date": "not a timestamp", "qty": 201.0 },
+                    { "date": "2026-07-28 00:00:00 -0700" },
+                    { "date": "2026-07-28 00:00:00 -0700", "qty": 234.0 }
+                ] }
+            ])),
+        )
+        .await
+        .expect("ingest");
+        assert_eq!(report.ingested, 1, "only the well-formed point stores");
+        assert_eq!(
+            report.skipped, 3,
+            "the other three left no row anywhere and must still be counted"
+        );
+        assert!(
+            report.refused.is_empty(),
+            "unreadable is not the same as refused"
         );
     }
 

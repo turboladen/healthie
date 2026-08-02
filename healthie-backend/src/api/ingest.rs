@@ -67,7 +67,15 @@ pub async fn hae(
     // 364 ordinary ones would not be read — and a metric refused on EVERY push
     // means the live feed changed shape and rows that used to land are now
     // being held instead. That is the signal `warn` exists for.
-    if report.refused.is_empty() && report.bounds_cleared == 0 {
+    // An unknown NAME belongs here too: ADR-0005 §4 calls quarantine the
+    // discovery surface, and HAE shipping a metric this build has never seen is
+    // exactly the "the feed changed shape" signal, whether the change refuses
+    // something or merely adds something.
+    let quiet = report.refused.is_empty()
+        && report.bounds_cleared == 0
+        && report.quarantined.is_empty()
+        && report.skipped == 0;
+    if quiet {
         tracing::info!(
             ingested = report.ingested,
             quarantined = ?report.quarantined,
@@ -82,11 +90,12 @@ pub async fn hae(
             range = ?report.date_range,
             bounds_cleared = report.bounds_cleared,
             quarantine_retired = report.quarantine_retired,
+            skipped = report.skipped,
             refused = ?report.refused,
             // Deliberately not "refused points": a cleared bound still stores
             // its row, and `Refusal::stored` says which happened. Claiming
             // nothing landed would be worse than saying less.
-            "hae ingest held some readings back — see refused; the points are in quarantined_metric",
+            "hae ingest did not store everything it was sent — see refused/quarantined/skipped",
         );
     }
     Ok(StatusCode::NO_CONTENT)
