@@ -20,7 +20,10 @@ use crate::{
         quarantined_metric::{self, QuarantineMeta, QuarantineReason},
     },
     error::DomainResult,
-    services::units::{Producer, convert_to_canonical},
+    services::{
+        plausibility,
+        units::{Producer, convert_to_canonical},
+    },
 };
 
 /// How an incoming HAE metric name is classified.
@@ -501,8 +504,15 @@ fn canonical(units: &str, kind: MetricKind, raw: f64) -> Result<f64, QuarantineR
     if !raw.is_finite() {
         return Err(QuarantineReason::NonFiniteValue);
     }
-    convert_to_canonical(units, kind, raw, Producer::HealthAutoExport)
-        .ok_or(QuarantineReason::UnconvertibleUnit)
+    let value = convert_to_canonical(units, kind, raw, Producer::HealthAutoExport)
+        .ok_or(QuarantineReason::UnconvertibleUnit)?;
+    // Bounds are stated in the canonical unit, so they can only be applied
+    // after conversion: 100 kg is a plausible weight and 100 lb is too, but
+    // only one of them is what this row would have meant.
+    match plausibility::reject_reason(kind, value) {
+        Some(reason) => Err(reason),
+        None => Ok(value),
+    }
 }
 
 /// [`canonical`] for an optional `min`/`max` column: absent stays absent, and
@@ -1150,6 +1160,120 @@ mod tests {
             (rows[0].value - 30.3).abs() < f64::EPSILON,
             "HAE is assumed to send 0-100 already; nothing scales it"
         );
+    }
+
+    /// healthie-55h, live side. The two halves of one rule: a value we cannot
+    /// trust costs the point, a *bound* we cannot trust costs only that column.
+    ///
+    /// The row is kept because the day's average is sound and independently
+    /// measured — discarding it to punish a sensor glitch in the spread would
+    /// throw away good data. The point is still quarantined verbatim, so the
+    /// dropped number is recoverable: the two tables are independent.
+    #[tokio::test]
+    async fn an_impossible_bound_costs_the_column_but_not_the_row() {
+        let db = test_db().await;
+        let report = ingest_hae(
+            &db,
+            payload(serde_json::json!([
+                { "name": "blood_oxygen_saturation", "units": "%",
+                  "data": [{ "date": "2026-07-28 00:00:00 -0700",
+                             "Avg": 96.4, "Min": 0.0, "Max": 99.0 }] }
+            ])),
+        )
+        .await
+        .expect("ingest");
+
+        assert_eq!(report.ingested, 1, "the row still lands");
+        assert_eq!(report.bounds_cleared, 1);
+        let rows = daily_metric::Entity::find().all(&db).await.unwrap();
+        assert!((rows[0].value - 96.4).abs() < f64::EPSILON);
+        assert_eq!(rows[0].min, None, "0% saturation is not a measurement");
+        assert!(
+            (rows[0].max.unwrap() - 99.0).abs() < f64::EPSILON,
+            "the trustworthy bound survives"
+        );
+
+        assert_eq!(report.refused.len(), 1);
+        assert!(report.refused[0].stored, "a row landed despite the refusal");
+        assert_eq!(report.refused[0].reason, QuarantineReason::ImplausibleValue);
+        assert_eq!(
+            quarantined_metric::Entity::find()
+                .all(&db)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the discarded number is still recoverable"
+        );
+    }
+
+    /// An impossible `value` has nothing storable in it, so no row lands.
+    #[tokio::test]
+    async fn an_impossible_value_refuses_the_whole_point() {
+        let db = test_db().await;
+        let report = ingest_hae(
+            &db,
+            payload(serde_json::json!([
+                { "name": "body_fat_percentage", "units": "%",
+                  "data": [{ "date": "2026-07-28 00:00:00 -0700", "qty": 0.0 }] }
+            ])),
+        )
+        .await
+        .expect("ingest");
+        assert_eq!(report.ingested, 0);
+        assert_eq!(report.bounds_cleared, 0);
+        assert!(!report.refused[0].stored);
+        assert!(
+            daily_metric::Entity::find()
+                .all(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// healthie-55h's confirmed case, at stage granularity: 2023-12-29's sleep
+    /// app ran for a day and a half. The impossible total goes; the ordinary
+    /// stages recorded beside it stay, and the quarantine row names exactly
+    /// which kinds were refused.
+    #[tokio::test]
+    async fn an_impossible_sleep_stage_refuses_only_that_stage() {
+        let db = test_db().await;
+        let report = ingest_hae(
+            &db,
+            payload(serde_json::json!([
+                { "name": "sleep_analysis", "units": "hr",
+                  "data": [{ "date": "2023-12-29 00:00:00 -0700",
+                             "totalSleep": 49.877, "inBed": 52.953,
+                             "deep": 1.36, "rem": 1.34, "core": 3.4 }] }
+            ])),
+        )
+        .await
+        .expect("ingest");
+
+        assert_eq!(report.ingested, 3, "deep, rem and core are ordinary nights");
+        let kinds: Vec<_> = daily_metric::Entity::find()
+            .all(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.kind)
+            .collect();
+        assert!(kinds.contains(&MetricKind::SleepDeep));
+        assert!(kinds.contains(&MetricKind::SleepRem));
+        assert!(kinds.contains(&MetricKind::SleepCore));
+        assert!(!kinds.contains(&MetricKind::SleepTotal));
+        assert!(!kinds.contains(&MetricKind::TimeInBed));
+
+        assert_eq!(report.refused.len(), 1, "one point, so one complaint");
+        assert_eq!(
+            report.refused[0].kinds,
+            vec![MetricKind::SleepTotal, MetricKind::TimeInBed]
+        );
+        let rows = quarantined_metric::Entity::find().all(&db).await.unwrap();
+        assert_eq!(rows[0].raw_point["_import"]["reason"], "implausible-value");
+        assert_eq!(rows[0].raw_point["_import"]["kinds"][0], "sleep-total");
+        assert_eq!(rows[0].raw_point["_import"]["kinds"][1], "time-in-bed");
     }
 
     #[tokio::test]
