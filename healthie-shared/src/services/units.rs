@@ -112,8 +112,8 @@ fn to_ucum(raw: &str) -> Option<&'static str> {
     Some(match folded.as_str() {
         // Dimensionless and count-like.
         "%" | "percent" => UCUM_PERCENT,
-        "count" => "{count}",
-        "count/min" | "bpm" => "/min",
+        "count" | "steps" => "{count}",
+        "count/min" | "bpm" | "beats/min" => "/min",
         // Mass.
         "kg" | "kilogram" | "kilograms" => "kg",
         "g" | "gram" | "grams" => "g",
@@ -133,9 +133,10 @@ fn to_ucum(raw: &str) -> Option<&'static str> {
         "kcal" | "kilocalorie" | "kilocalories" => "kcal_th",
         "kj" => "kJ",
         "j" | "joule" | "joules" => "J",
-        // Velocity.
-        "mi/hr" | "mph" => "[mi_i]/h",
-        "km/hr" | "kph" => "km/h",
+        // Velocity. `fold` normalizes case and separators but not the `hr`/`h`
+        // suffix, so both spellings are listed rather than derived.
+        "mi/hr" | "mi/h" | "mph" => "[mi_i]/h",
+        "km/hr" | "km/h" | "kph" => "km/h",
         "m/s" | "m/sec" => "m/s",
         // Duration.
         "ms" => "ms",
@@ -176,6 +177,38 @@ mod tests {
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-6
+    }
+
+    /// Spellings a producer may reasonably write that the vocabulary did not
+    /// accept. `fold` normalizes case, whitespace and Apple's `·`/`*` product
+    /// separators — it does **not** normalize `hr` against `h`, nor know that
+    /// `steps` and `beats` are counts, so each spelling has to be listed.
+    ///
+    /// An unlisted spelling is not a cosmetic gap: it quarantines every record
+    /// of that metric, and on the live path that is a whole kind going missing
+    /// from every push.
+    #[test]
+    fn plausible_spellings_are_all_in_the_vocabulary() {
+        for (spelling, kind, expected) in [
+            ("km/h", MetricKind::WalkingSpeed, 0.621_371_192_237_334),
+            ("mi/h", MetricKind::WalkingSpeed, 1.0),
+            ("beats/min", MetricKind::HeartRate, 1.0),
+            ("steps", MetricKind::Steps, 1.0),
+        ] {
+            let got = convert_to_canonical(spelling, kind, 1.0)
+                .unwrap_or_else(|| panic!("{spelling} must be in the vocabulary"));
+            assert!(
+                close(got, expected),
+                "{spelling}: got {got}, want {expected}"
+            );
+        }
+        // Not an oversight to be "fixed": a lowercase `cal` is conventionally
+        // the small calorie, and guessing between it and Apple's `Cal` is a
+        // 1000x error. It stays refused.
+        assert_eq!(
+            convert_to_canonical("cal", MetricKind::ActiveEnergy, 1.0),
+            None
+        );
     }
 
     #[test]
