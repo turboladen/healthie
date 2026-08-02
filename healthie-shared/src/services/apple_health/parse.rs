@@ -25,7 +25,7 @@ use quick_xml::{
 use serde_json::{Map, Value};
 
 use super::{
-    accumulate::{Accumulator, Interval, daily_agg},
+    accumulate::{Accumulator, Interval, RefusedTally, daily_agg},
     mapping::{HkMapping, map_hk_name, map_sleep_stage},
 };
 use crate::{
@@ -33,6 +33,7 @@ use crate::{
     error::{DomainError, DomainResult},
     services::{
         metrics::parse_local,
+        plausibility,
         units::{Producer, convert_to_canonical},
     },
 };
@@ -76,6 +77,11 @@ pub(crate) struct ImportStats {
     /// `(type, unit)` pairs no conversion covers, with how many records each
     /// affected.
     pub(crate) unconvertible: BTreeMap<(String, String), u64>,
+    /// Readings refused as physically impossible, per kind. Counted and
+    /// reported rather than quarantined: unlike the live path, the raw records
+    /// are still on disk in `export.xml`, so a widened bound plus a re-run
+    /// recovers every one of them (ADR-0006 §7).
+    pub(crate) implausible: BTreeMap<MetricKind, RefusedTally>,
     /// Whether every element opened was also closed before EOF.
     ///
     /// A transfer of a multi-gigabyte export interrupted at a clean record
@@ -293,6 +299,19 @@ fn fold_quantity(
         );
         return;
     };
+    // Before the fold, not after it. Excluding the artifact READING is what
+    // lets the day keep its real minimum: a single 0.000 SpO2 sample would
+    // otherwise become the day's `min`, and refusing it only at the rollup
+    // would clear the column and lose the genuine low with it.
+    //
+    // Note this is a per-DAY table applied per record, so the ceilings are
+    // nearly vacuous here — no single record approaches 200,000 steps. What
+    // bites at this level is the lower bound, on the `AvgMinMax`/`Mean` kinds
+    // where one reading is directly comparable to a daily figure.
+    if plausibility::reject_reason(kind, value).is_some() {
+        RefusedTally::note(&mut stats.implausible, kind, value, start.date_naive()).records += 1;
+        return;
+    }
     let Some(agg) = daily_agg(kind) else {
         // Unreachable by construction: `map_hk_name` never returns `Curated`
         // for a sleep kind. Reported rather than panicked in a long backfill.
@@ -405,6 +424,60 @@ mod tests {
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-6
+    }
+
+    /// healthie-55h's confirmed case, and the reason the check has to run per
+    /// RECORD and not only per rollup.
+    ///
+    /// A 0.000 `SpO2` sample is a sensor artifact — it is what put a 0.000 floor
+    /// on 962 days of the real import. Excluding the reading lets the day keep
+    /// its genuine low of 95; refusing it only at the rollup would have cleared
+    /// the whole `min` column and thrown the real number away with the fake
+    /// one. The mean moves too, and is supposed to.
+    #[test]
+    fn an_impossible_reading_is_excluded_so_the_day_keeps_its_real_minimum() {
+        let (rows, stats) = parse(
+            r#"<HealthData>
+              <Record type="HKQuantityTypeIdentifierOxygenSaturation" unit="%"
+                      startDate="2026-07-28 01:00:00 -0700" endDate="2026-07-28 01:00:00 -0700" value="0"/>
+              <Record type="HKQuantityTypeIdentifierOxygenSaturation" unit="%"
+                      startDate="2026-07-28 02:00:00 -0700" endDate="2026-07-28 02:00:00 -0700" value="0.95"/>
+              <Record type="HKQuantityTypeIdentifierOxygenSaturation" unit="%"
+                      startDate="2026-07-28 03:00:00 -0700" endDate="2026-07-28 03:00:00 -0700" value="0.99"/>
+            </HealthData>"#,
+        );
+        let row = row_for(&rows, MetricKind::Spo2);
+        assert!(
+            close(row.min.unwrap(), 95.0),
+            "the real low must survive, got {:?}",
+            row.min
+        );
+        assert!(close(row.max.unwrap(), 99.0));
+        assert!(
+            close(row.value, 97.0),
+            "the mean is taken over the readings that were measurements"
+        );
+        let tally = stats.implausible[&MetricKind::Spo2];
+        assert_eq!(tally.records, 1);
+        assert_eq!(tally.rows, 0, "the day still produced a row");
+        assert_eq!(tally.sample.unwrap().1, date("2026-07-28"));
+    }
+
+    /// Sleep has no per-record value to bound — a night only exists after the
+    /// interval union — so the refusal has to happen at the rollup. This is
+    /// 2023-12-29: a sleep app left running for a day and a half.
+    #[test]
+    fn a_night_longer_than_a_day_produces_no_row() {
+        let (rows, _) = parse(
+            r#"<HealthData>
+              <Record type="HKCategoryTypeIdentifierSleepAnalysis" value="HKCategoryValueSleepAnalysisAsleepUnspecified"
+                      startDate="2023-12-29 15:52:45 -0700" endDate="2023-12-31 03:59:51 -0700"/>
+            </HealthData>"#,
+        );
+        assert!(
+            !rows.iter().any(|r| r.kind == MetricKind::SleepTotal),
+            "36 hours attributed to one sleep-day is not a night"
+        );
     }
 
     #[test]
