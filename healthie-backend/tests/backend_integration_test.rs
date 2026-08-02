@@ -68,7 +68,8 @@ async fn ingest_requires_bearer_and_returns_204() {
 
     let (app, token, db) = app_with_ingest_token().await;
     let payload = serde_json::json!({ "data": { "metrics": [
-        { "name": "weight_body_mass", "data": [{ "date": "2026-07-28 00:00:00 -0700", "qty": 234.0 }] }
+        { "name": "weight_body_mass", "units": "lb",
+          "data": [{ "date": "2026-07-28 00:00:00 -0700", "qty": 234.0 }] }
     ] } });
 
     // No token → 401.

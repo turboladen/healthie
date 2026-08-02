@@ -35,38 +35,82 @@
 //! `mm[Hg]`). Mapping those spellings onto codes is [`to_ucum`], and it stays
 //! ours because it describes two vendors' habits, not physics.
 //!
-//! **Percent scaling.** Apple's `%` is a 0-1 fraction and ours is 0-100. That
-//! is a *scale convention*, not a dimensional conversion — UCUM correctly
-//! reports `%`→`%` as unity — so it is applied separately and deliberately.
+//! **Percent scaling.** A `%` may mean 0-1 or 0-100 depending on who wrote it.
+//! That is a *scale convention*, not a dimensional conversion — UCUM correctly
+//! reports `%`→`%` as unity — so it is applied separately, and it belongs to
+//! the [`Producer`] rather than to the unit string.
 
 use crate::entities::daily_metric::MetricKind;
 
-/// Apple writes `%` for `HealthKit`'s `HKUnit.percent()`, which is a **0-1
-/// fraction**, not a 0-100 percentage: 30.3% body fat is exported as `0.303`
-/// and a 98.5% blood-oxygen reading as `0.985`. Our canonical `%` is 0-100, so
-/// the same unit string means a different scale on each side.
+/// Which intake produced a reading.
 ///
-/// Confirmed against a real 7.6M-record export (2026-07-31), not inferred —
-/// and worth the wait, because a range heuristic would have got it wrong:
-/// `GaitDoubleSupport` arrived spanning `0.259 .. 0.358`, entirely plausible
-/// *as* a percentage, so guessing would have left that one 100x low while
-/// correctly fixing blood oxygen.
-const PERCENT_SCALE: f64 = 100.0;
+/// Percent scale is a property of the **producer**, not of the unit string, and
+/// conflating the two is a 100x error waiting to happen. `HealthKit`'s `%` is a
+/// 0-1 fraction; nothing says another exporter agrees, and this codebase has
+/// evidence about exactly one of them.
+///
+/// It is the only thing conversion needs to know about who is calling. Every
+/// other difference between the two intakes — per-record versus pre-aggregated,
+/// quarantine granularity — is handled by the callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Producer {
+    /// The `export.xml` backfill (`services::apple_health`).
+    AppleExportXml,
+    /// The live Health Auto Export push (`services::metrics`).
+    HealthAutoExport,
+}
+
+impl Producer {
+    /// Multiplier taking this producer's percent convention to canonical 0-100.
+    fn percent_scale(self) -> f64 {
+        match self {
+            // Apple writes `%` for `HealthKit`'s `HKUnit.percent()`, which is a
+            // **0-1 fraction**: 30.3% body fat is exported as `0.303` and a
+            // 98.5% blood-oxygen reading as `0.985`.
+            //
+            // Confirmed against a real 7.6M-record export (2026-07-31), not
+            // inferred — and worth the wait, because a range heuristic would
+            // have got it wrong: `GaitDoubleSupport` arrived spanning
+            // `0.259 .. 0.358`, entirely plausible *as* a percentage, so
+            // guessing would have left that one 100x low while correctly
+            // fixing blood oxygen.
+            Self::AppleExportXml => 100.0,
+            // UNVERIFIED. HAE is a different producer and nothing in this
+            // codebase records its convention — Steve's device was unreachable
+            // when this was written. Unity is chosen because it preserves
+            // exactly what the live path did before it converted at all, so
+            // routing HAE through this function cannot silently move a stored
+            // number by 100x in either direction.
+            //
+            // healthie-t58 settles it the way healthie-4u7 settled the export
+            // side: by reading the observed span on the first real push. Until
+            // then `ingest_hae` warns when a percent kind arrives at or below
+            // 1.0, which is what a fraction-sending HAE would look like.
+            Self::HealthAutoExport => 1.0,
+        }
+    }
+}
 
 /// The UCUM code for a percentage, in both vocabularies.
 const UCUM_PERCENT: &str = "%";
 
-/// Convert `value` from `raw_unit` into `kind`'s canonical unit.
+/// Convert `value` from `raw_unit`, as written by `producer`, into `kind`'s
+/// canonical unit.
 ///
 /// Returns `None` when the unit is not in our vocabulary, or is in it but
 /// measures the wrong thing — the caller quarantines rather than storing.
 /// Unit strings are matched case-insensitively where that is safe, and
 /// tolerate Apple's punctuation variants (`mL/min·kg` vs `ml/(kg·min)`).
-pub(crate) fn convert_to_canonical(raw_unit: &str, kind: MetricKind, value: f64) -> Option<f64> {
+pub(crate) fn convert_to_canonical(
+    raw_unit: &str,
+    kind: MetricKind,
+    value: f64,
+    producer: Producer,
+) -> Option<f64> {
     let target = kind.unit();
     // Fast path for the overwhelming majority of records: byte-identical unit
     // strings that also agree on scale. Percent is excluded because it is the
-    // one unit where the strings match but the scales do not. This also keeps
+    // one unit where the strings match but the scales need not. This also keeps
     // UCUM's expression parsing off the hot loop for records that already
     // arrive canonical — most of the 7.6M in a real export.
     if raw_unit == target && target != UCUM_PERCENT {
@@ -79,7 +123,7 @@ pub(crate) fn convert_to_canonical(raw_unit: &str, kind: MetricKind, value: f64)
     let to = to_ucum(target)?;
 
     if from == UCUM_PERCENT && to == UCUM_PERCENT {
-        return Some(value * PERCENT_SCALE);
+        return Some(value * producer.percent_scale());
     }
     // Second fast path, on the CODE rather than the spelling: `mL/min·kg` and
     // `ml/(kg·min)` are not byte-identical to the canonical string but resolve
@@ -172,7 +216,7 @@ fn fold(trimmed: &str) -> String {
 mod tests {
     use sea_orm::strum::IntoEnumIterator as _;
 
-    use super::{convert_to_canonical, to_ucum};
+    use super::{Producer, convert_to_canonical, to_ucum};
     use crate::entities::daily_metric::MetricKind;
 
     fn close(a: f64, b: f64) -> bool {
@@ -195,7 +239,7 @@ mod tests {
             ("beats/min", MetricKind::HeartRate, 1.0),
             ("steps", MetricKind::Steps, 1.0),
         ] {
-            let got = convert_to_canonical(spelling, kind, 1.0)
+            let got = convert_to_canonical(spelling, kind, 1.0, Producer::HealthAutoExport)
                 .unwrap_or_else(|| panic!("{spelling} must be in the vocabulary"));
             assert!(
                 close(got, expected),
@@ -206,7 +250,12 @@ mod tests {
         // the small calorie, and guessing between it and Apple's `Cal` is a
         // 1000x error. It stays refused.
         assert_eq!(
-            convert_to_canonical("cal", MetricKind::ActiveEnergy, 1.0),
+            convert_to_canonical(
+                "cal",
+                MetricKind::ActiveEnergy,
+                1.0,
+                Producer::HealthAutoExport
+            ),
             None
         );
     }
@@ -214,15 +263,28 @@ mod tests {
     #[test]
     fn identity_when_already_canonical() {
         assert!(close(
-            convert_to_canonical("lb", MetricKind::Weight, 234.2).unwrap(),
+            convert_to_canonical("lb", MetricKind::Weight, 234.2, Producer::AppleExportXml)
+                .unwrap(),
             234.2
         ));
         assert!(close(
-            convert_to_canonical("count/min", MetricKind::HeartRate, 61.0).unwrap(),
+            convert_to_canonical(
+                "count/min",
+                MetricKind::HeartRate,
+                61.0,
+                Producer::AppleExportXml
+            )
+            .unwrap(),
             61.0
         ));
         assert!(close(
-            convert_to_canonical("mmHg", MetricKind::BloodPressureSystolic, 118.0).unwrap(),
+            convert_to_canonical(
+                "mmHg",
+                MetricKind::BloodPressureSystolic,
+                118.0,
+                Producer::AppleExportXml
+            )
+            .unwrap(),
             118.0
         ));
     }
@@ -240,7 +302,7 @@ mod tests {
                 kind.unit()
             );
             assert!(
-                convert_to_canonical(kind.unit(), kind, 1.0).is_some(),
+                convert_to_canonical(kind.unit(), kind, 1.0, Producer::AppleExportXml).is_some(),
                 "{kind:?} rejects its own unit {}",
                 kind.unit()
             );
@@ -333,7 +395,7 @@ mod tests {
             ("s", MetricKind::TimeInBed, 1.0 / 3600.0),
         ];
         for (from, kind, expected) in cases {
-            let got = convert_to_canonical(from, *kind, 1.0)
+            let got = convert_to_canonical(from, *kind, 1.0, Producer::AppleExportXml)
                 .unwrap_or_else(|| panic!("{from} -> {kind:?} must convert"));
             let rel = ((got - expected) / expected).abs();
             // 1e-12 admits last-ULP re-association (observed max 2e-16) while
@@ -351,11 +413,22 @@ mod tests {
     #[test]
     fn apple_cal_is_kilocalories_but_lowercase_cal_is_refused() {
         assert!(close(
-            convert_to_canonical("Cal", MetricKind::ActiveEnergy, 512.0).unwrap(),
+            convert_to_canonical(
+                "Cal",
+                MetricKind::ActiveEnergy,
+                512.0,
+                Producer::AppleExportXml
+            )
+            .unwrap(),
             512.0
         ));
         assert_eq!(
-            convert_to_canonical("cal", MetricKind::ActiveEnergy, 512.0),
+            convert_to_canonical(
+                "cal",
+                MetricKind::ActiveEnergy,
+                512.0,
+                Producer::AppleExportXml
+            ),
             None,
             "lowercase cal is ambiguous — quarantine, never a 1000x guess"
         );
@@ -368,7 +441,13 @@ mod tests {
         for spelling in ["mL/min·kg", "ml/(kg·min)", "mL/min*kg", "ML/MIN·KG"] {
             assert!(
                 close(
-                    convert_to_canonical(spelling, MetricKind::Vo2Max, 42.0).unwrap(),
+                    convert_to_canonical(
+                        spelling,
+                        MetricKind::Vo2Max,
+                        42.0,
+                        Producer::AppleExportXml
+                    )
+                    .unwrap(),
                     42.0
                 ),
                 "{spelling} should be recognized as canonical"
@@ -383,38 +462,87 @@ mod tests {
     fn apple_percent_fractions_scale_to_0_100() {
         // Real spans from Steve's export: body fat 0.303, blood oxygen 0.985.
         assert!(close(
-            convert_to_canonical("%", MetricKind::BodyFat, 0.303).unwrap(),
+            convert_to_canonical("%", MetricKind::BodyFat, 0.303, Producer::AppleExportXml)
+                .unwrap(),
             30.3
         ));
         assert!(close(
-            convert_to_canonical("%", MetricKind::Spo2, 0.985).unwrap(),
+            convert_to_canonical("%", MetricKind::Spo2, 0.985, Producer::AppleExportXml).unwrap(),
             98.5
         ));
         // Including the one a range heuristic would have got wrong: 0.259 reads
         // as a plausible percentage on its own.
         assert!(close(
-            convert_to_canonical("%", MetricKind::GaitDoubleSupport, 0.259).unwrap(),
+            convert_to_canonical(
+                "%",
+                MetricKind::GaitDoubleSupport,
+                0.259,
+                Producer::AppleExportXml
+            )
+            .unwrap(),
             25.9
         ));
         assert!(close(
-            convert_to_canonical("%", MetricKind::GaitAsymmetry, 0.9).unwrap(),
+            convert_to_canonical(
+                "%",
+                MetricKind::GaitAsymmetry,
+                0.9,
+                Producer::AppleExportXml
+            )
+            .unwrap(),
             90.0
         ));
+    }
+
+    /// The same `%` string, the same kind, two producers, two scales — which is
+    /// the whole reason the scale is the producer's and not the unit's.
+    ///
+    /// HAE's convention is UNVERIFIED (healthie-t58). Unity is pinned here not
+    /// because it is known correct but because it is what the live path did
+    /// before it converted at all: this test is what fails, loudly and in one
+    /// place, on the day t58 is answered.
+    #[test]
+    fn percent_scale_follows_the_producer_not_the_unit() {
+        let apple = convert_to_canonical("%", MetricKind::BodyFat, 0.303, Producer::AppleExportXml);
+        let hae = convert_to_canonical("%", MetricKind::BodyFat, 0.303, Producer::HealthAutoExport);
+        assert!(close(apple.unwrap(), 30.3), "Apple writes a 0-1 fraction");
+        assert!(
+            close(hae.unwrap(), 0.303),
+            "HAE is assumed already 0-100, so its value passes through untouched"
+        );
     }
 
     /// Scaling must not leak into units that merely look similar.
     #[test]
     fn percent_scaling_is_confined_to_percent_kinds() {
         assert!(close(
-            convert_to_canonical("count/min", MetricKind::HeartRate, 61.0).unwrap(),
+            convert_to_canonical(
+                "count/min",
+                MetricKind::HeartRate,
+                61.0,
+                Producer::AppleExportXml
+            )
+            .unwrap(),
             61.0
         ));
         assert!(close(
-            convert_to_canonical("count", MetricKind::FlightsClimbed, 12.0).unwrap(),
+            convert_to_canonical(
+                "count",
+                MetricKind::FlightsClimbed,
+                12.0,
+                Producer::AppleExportXml
+            )
+            .unwrap(),
             12.0
         ));
         assert!(close(
-            convert_to_canonical("mmHg", MetricKind::BloodPressureDiastolic, 78.0).unwrap(),
+            convert_to_canonical(
+                "mmHg",
+                MetricKind::BloodPressureDiastolic,
+                78.0,
+                Producer::AppleExportXml
+            )
+            .unwrap(),
             78.0
         ));
     }
@@ -426,20 +554,41 @@ mod tests {
     fn unknown_and_wrong_dimension_units_are_both_refused() {
         // Not in the vocabulary at all.
         assert_eq!(
-            convert_to_canonical("furlong", MetricKind::Weight, 21.0),
+            convert_to_canonical(
+                "furlong",
+                MetricKind::Weight,
+                21.0,
+                Producer::AppleExportXml
+            ),
             None
         );
-        assert_eq!(convert_to_canonical("", MetricKind::Steps, 1.0), None);
+        assert_eq!(
+            convert_to_canonical("", MetricKind::Steps, 1.0, Producer::AppleExportXml),
+            None
+        );
         // Known units, wrong dimension for the kind.
         assert_eq!(
-            convert_to_canonical("mmHg", MetricKind::HeartRate, 120.0),
+            convert_to_canonical(
+                "mmHg",
+                MetricKind::HeartRate,
+                120.0,
+                Producer::AppleExportXml
+            ),
             None
         );
         assert_eq!(
-            convert_to_canonical("kg", MetricKind::WalkingDistance, 5.0),
+            convert_to_canonical(
+                "kg",
+                MetricKind::WalkingDistance,
+                5.0,
+                Producer::AppleExportXml
+            ),
             None
         );
-        assert_eq!(convert_to_canonical("min", MetricKind::Weight, 5.0), None);
+        assert_eq!(
+            convert_to_canonical("min", MetricKind::Weight, 5.0, Producer::AppleExportXml),
+            None
+        );
     }
 
     /// Apple's `mmHg` is not valid UCUM — the code is `mm[Hg]`. Pinned because

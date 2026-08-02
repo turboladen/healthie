@@ -4,6 +4,8 @@
 //! [`ingest_hae`] in one transaction; the mapping/extraction helpers below are
 //! pure so they can be unit-tested without a database.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
@@ -18,6 +20,7 @@ use crate::{
         quarantined_metric::{self, QuarantineMeta, QuarantineReason},
     },
     error::DomainResult,
+    services::units::{Producer, convert_to_canonical},
 };
 
 /// How an incoming HAE metric name is classified.
@@ -147,13 +150,62 @@ pub struct HaeMetric {
 #[derive(Debug)]
 pub struct IngestReport {
     pub ingested: usize,
+    /// Names that were never recognized at all. Unchanged in meaning: a
+    /// *curated* name that could not be stored appears in [`Self::refused`].
     pub quarantined: Vec<String>,
     pub date_range: Option<(NaiveDate, NaiveDate)>,
+    /// Curated points this push would not store, and why. Every entry has a
+    /// matching `quarantined_metric` row holding the point verbatim.
+    ///
+    /// Bounded by the points in one push. It is the thing to read after a
+    /// deploy: a name appearing here every day means the live feed has changed
+    /// shape and rows that used to land are now being held instead.
+    pub refused: Vec<Refusal>,
+    /// Rows that stored, but with an `min`/`max` column dropped because that
+    /// number alone could not be trusted. The row's `value` is unaffected.
+    pub bounds_cleared: usize,
+}
+
+/// One curated point that could not be stored as it arrived.
+#[derive(Debug, Clone)]
+pub struct Refusal {
+    pub name: String,
+    pub date: NaiveDate,
+    pub reason: QuarantineReason,
+    /// The kinds refused. Several when one `sleep_analysis` point explodes and
+    /// only some stages were impossible.
+    pub kinds: Vec<MetricKind>,
+    /// Whether a row still landed — true when only a bound was dropped.
+    pub stored: bool,
+}
+
+/// A refusal accumulated per `(raw_name, date)`.
+///
+/// Keyed and resolved *after* the point loop rather than written inside it,
+/// because `quarantined_metric` is keyed `(raw_name, date)` while refusals are
+/// per point: two points on one date would otherwise let array order decide
+/// whether the day ends up complained about or swept clean.
+struct Complaint {
+    point: serde_json::Value,
+    reason: QuarantineReason,
+    units: Option<String>,
+    kinds: Vec<MetricKind>,
+    stored: bool,
 }
 
 /// Ingest one HAE health-metrics payload into `daily_metric` (curated) and
-/// `quarantined_metric` (unknown names), in one transaction. Idempotent:
-/// `(kind, date)` and `(raw_name, date)` upsert last-write-wins.
+/// `quarantined_metric` (unknown names, and curated points that could not be
+/// stored), in one transaction. Idempotent: `(kind, date)` and
+/// `(raw_name, date)` upsert last-write-wins.
+///
+/// # What it refuses, and why nothing is lost
+///
+/// Values are converted to `MetricKind::unit()` before storage and refused
+/// when they cannot be — the live counterpart of ADR-0006 §6, and the reason
+/// a `kg`-declared weight is no longer stored as though it were already
+/// pounds. A refused point is written verbatim to `quarantined_metric` with
+/// the declared units and the reason, because unlike the backfill there is no
+/// file on disk to re-read: the POST body is gone when this returns.
 ///
 /// # Errors
 /// Returns [`crate::error::DomainError::Db`] on database errors. Malformed
@@ -165,78 +217,325 @@ pub async fn ingest_hae<C: ConnectionTrait + TransactionTrait>(
 ) -> DomainResult<IngestReport> {
     let txn = db.begin().await?;
     let now = clock::now();
-    let mut ingested = 0usize;
-    let mut quarantined = Vec::new();
-    let mut min_date: Option<NaiveDate> = None;
-    let mut max_date: Option<NaiveDate> = None;
+    let mut run = Ingest::default();
 
     for metric in payload.data.metrics {
         match map_hae_name(&metric.name) {
             HaeMapping::Excluded => {}
-            HaeMapping::Unknown => {
-                let mut any = false;
-                for point in &metric.data {
-                    let Some(date) = point_date(point) else {
-                        continue;
-                    };
-                    upsert_quarantine(
-                        &txn,
-                        &metric.name,
-                        date,
-                        point,
-                        QuarantineMeta {
-                            reason: QuarantineReason::UnknownType,
-                            units: metric.units.as_deref(),
-                            kinds: &[],
-                        },
-                        now,
-                    )
-                    .await?;
-                    track_range(&mut min_date, &mut max_date, date);
-                    any = true;
-                }
-                if any {
-                    quarantined.push(metric.name.clone());
-                }
-            }
-            HaeMapping::Curated(kind) => {
-                warn_on_unit_mismatch(kind, metric.units.as_deref());
-                for point in &metric.data {
-                    let Some(date) = point_date(point) else {
-                        continue;
-                    };
-                    let Some((value, min, max)) = scalar_or_aggregate(point) else {
-                        continue;
-                    };
-                    upsert_metric(&txn, kind, date, value, min, max, point_source(point), now)
-                        .await?;
-                    track_range(&mut min_date, &mut max_date, date);
-                    ingested += 1;
-                }
-            }
-            HaeMapping::Sleep => {
-                for point in &metric.data {
-                    let Some(date) = point_date(point) else {
-                        continue;
-                    };
-                    let src = point_source(point);
-                    for (kind, value) in sleep_rows(point) {
-                        upsert_metric(&txn, kind, date, value, None, None, src.clone(), now)
-                            .await?;
-                        ingested += 1;
-                    }
-                    track_range(&mut min_date, &mut max_date, date);
-                }
-            }
+            HaeMapping::Unknown => run.unknown(&metric),
+            HaeMapping::Curated(kind) => run.curated(&txn, kind, &metric, now).await?,
+            HaeMapping::Sleep => run.sleep(&txn, &metric, now).await?,
         }
     }
 
+    let report = run.finish(&txn, now).await?;
     txn.commit().await?;
-    Ok(IngestReport {
-        ingested,
-        quarantined,
-        date_range: min_date.zip(max_date),
-    })
+    Ok(report)
+}
+
+/// The mutable state of one ingest, so each arm is its own readable unit and
+/// the counters cannot drift apart across them.
+#[derive(Default)]
+struct Ingest {
+    ingested: usize,
+    quarantined: Vec<String>,
+    min_date: Option<NaiveDate>,
+    max_date: Option<NaiveDate>,
+    complaints: BTreeMap<(String, NaiveDate), Complaint>,
+    /// Keys that stored something cleanly. Only those with no complaint at all
+    /// retire a standing quarantine row.
+    settled: BTreeSet<(String, NaiveDate)>,
+    bounds_cleared: usize,
+}
+
+impl Ingest {
+    /// A name never seen before: every point of it is held verbatim.
+    fn unknown(&mut self, metric: &HaeMetric) {
+        let mut any = false;
+        for point in &metric.data {
+            let Some(date) = point_date(point) else {
+                continue;
+            };
+            self.complain(
+                (&metric.name, date),
+                point,
+                QuarantineReason::UnknownType,
+                metric.units.as_deref(),
+                None,
+            );
+            self.track_range(date);
+            any = true;
+        }
+        if any {
+            self.quarantined.push(metric.name.clone());
+        }
+    }
+
+    /// A curated scalar or aggregate metric.
+    async fn curated<C: ConnectionTrait>(
+        &mut self,
+        db: &C,
+        kind: MetricKind,
+        metric: &HaeMetric,
+        now: DateTime<Utc>,
+    ) -> DomainResult<()> {
+        for point in &metric.data {
+            let Some(date) = point_date(point) else {
+                continue;
+            };
+            let Some((value, min, max)) = scalar_or_aggregate(point) else {
+                continue;
+            };
+            self.track_range(date);
+            let key = (metric.name.as_str(), date);
+            // Units are declared once per metric, not per point, so a metric
+            // with none refuses every point it carries rather than assuming
+            // they arrived canonical.
+            let Some(units) = metric.units.as_deref() else {
+                self.complain(key, point, QuarantineReason::MissingUnit, None, Some(kind));
+                continue;
+            };
+            let value = match canonical(units, kind, value) {
+                Ok(value) => value,
+                Err(reason) => {
+                    self.complain(key, point, reason, Some(units), Some(kind));
+                    continue;
+                }
+            };
+            warn_if_percent_looks_like_a_fraction(kind, value);
+            // A bound we cannot trust is not written, but it does not cost the
+            // day its average: the row lands without it, and the point is
+            // still held verbatim so the dropped number is recoverable.
+            let (min, min_refused) = canonical_bound(units, kind, min);
+            let (max, max_refused) = canonical_bound(units, kind, max);
+            if let Some(reason) = min_refused.or(max_refused) {
+                self.bounds_cleared += 1;
+                self.complain_stored(key, point, reason, Some(units), Some(kind));
+            } else {
+                self.settled.insert((metric.name.clone(), date));
+            }
+            upsert_metric(db, kind, date, value, min, max, point_source(point), now).await?;
+            self.ingested += 1;
+        }
+        Ok(())
+    }
+
+    /// `sleep_analysis`, which explodes one point into up to six rows.
+    async fn sleep<C: ConnectionTrait>(
+        &mut self,
+        db: &C,
+        metric: &HaeMetric,
+        now: DateTime<Utc>,
+    ) -> DomainResult<()> {
+        for point in &metric.data {
+            let Some(date) = point_date(point) else {
+                continue;
+            };
+            let src = point_source(point);
+            self.track_range(date);
+            let key = (metric.name.as_str(), date);
+            for (kind, raw) in sleep_rows(point) {
+                // Refusal is per STAGE, not per point: each stage is its own
+                // `(kind, date)` row, and a refused one is the same shape as a
+                // stage field that was simply absent (ADR-0005 §3). One
+                // impossible total must not discard the ordinary deep/REM/core
+                // rows recorded beside it.
+                let converted = match metric.units.as_deref() {
+                    None => Err(QuarantineReason::MissingUnit),
+                    Some(units) => canonical(units, kind, raw),
+                };
+                match converted {
+                    Ok(value) => {
+                        upsert_metric(db, kind, date, value, None, None, src.clone(), now).await?;
+                        self.ingested += 1;
+                        self.settled.insert((metric.name.clone(), date));
+                    }
+                    Err(reason) => {
+                        self.complain(key, point, reason, metric.units.as_deref(), Some(kind));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Write the complaints, retire the resolved ones, and describe the run.
+    async fn finish<C: ConnectionTrait>(
+        self,
+        db: &C,
+        now: DateTime<Utc>,
+    ) -> DomainResult<IngestReport> {
+        let refused = persist_complaints(db, &self.complaints, now).await?;
+        // Only keys with no complaint at all: a day that stored five sleep
+        // stages and refused one still has something to say.
+        for (name, date) in &self.settled {
+            if !self.complaints.contains_key(&(name.clone(), *date)) {
+                clear_quarantine(db, name, *date).await?;
+            }
+        }
+        Ok(IngestReport {
+            ingested: self.ingested,
+            quarantined: self.quarantined,
+            date_range: self.min_date.zip(self.max_date),
+            refused,
+            bounds_cleared: self.bounds_cleared,
+        })
+    }
+
+    fn track_range(&mut self, date: NaiveDate) {
+        self.min_date = Some(self.min_date.map_or(date, |m| m.min(date)));
+        self.max_date = Some(self.max_date.map_or(date, |m| m.max(date)));
+    }
+
+    fn complain(
+        &mut self,
+        key: (&str, NaiveDate),
+        point: &serde_json::Value,
+        reason: QuarantineReason,
+        units: Option<&str>,
+        kind: Option<MetricKind>,
+    ) {
+        complain(&mut self.complaints, key, point, reason, units, kind);
+    }
+
+    fn complain_stored(
+        &mut self,
+        key: (&str, NaiveDate),
+        point: &serde_json::Value,
+        reason: QuarantineReason,
+        units: Option<&str>,
+        kind: Option<MetricKind>,
+    ) {
+        complain_stored(&mut self.complaints, key, point, reason, units, kind);
+    }
+}
+
+/// Record that `(name, date)` could not be fully stored. Merges into whatever
+/// this key already holds, so a point refused for several kinds lands one row.
+fn complain(
+    complaints: &mut BTreeMap<(String, NaiveDate), Complaint>,
+    (name, date): (&str, NaiveDate),
+    point: &serde_json::Value,
+    reason: QuarantineReason,
+    units: Option<&str>,
+    kind: Option<MetricKind>,
+) {
+    let entry = complaints
+        .entry((name.to_owned(), date))
+        .or_insert_with(|| Complaint {
+            point: point.clone(),
+            reason,
+            units: units.map(str::to_owned),
+            kinds: Vec::new(),
+            stored: false,
+        });
+    if let Some(kind) = kind
+        && !entry.kinds.contains(&kind)
+    {
+        entry.kinds.push(kind);
+    }
+}
+
+/// [`complain`] for a point that still stored a row — only a bound was dropped.
+fn complain_stored(
+    complaints: &mut BTreeMap<(String, NaiveDate), Complaint>,
+    key: (&str, NaiveDate),
+    point: &serde_json::Value,
+    reason: QuarantineReason,
+    units: Option<&str>,
+    kind: Option<MetricKind>,
+) {
+    let existing = complaints.contains_key(&(key.0.to_owned(), key.1));
+    complain(complaints, key, point, reason, units, kind);
+    // Only claim "stored" for a key nothing else has already refused outright.
+    if !existing && let Some(entry) = complaints.get_mut(&(key.0.to_owned(), key.1)) {
+        entry.stored = true;
+    }
+}
+
+/// Write every accumulated complaint, and describe them for the report.
+async fn persist_complaints<C: ConnectionTrait>(
+    db: &C,
+    complaints: &BTreeMap<(String, NaiveDate), Complaint>,
+    now: DateTime<Utc>,
+) -> DomainResult<Vec<Refusal>> {
+    let mut refused = Vec::new();
+    for ((name, date), complaint) in complaints {
+        upsert_quarantine(
+            db,
+            name,
+            *date,
+            &complaint.point,
+            QuarantineMeta {
+                reason: complaint.reason,
+                units: complaint.units.as_deref(),
+                kinds: &complaint.kinds,
+            },
+            now,
+        )
+        .await?;
+        // An unknown NAME is already reported by name; listing it again as a
+        // refused point would double-count the same row.
+        if !complaint.kinds.is_empty() {
+            refused.push(Refusal {
+                name: name.clone(),
+                date: *date,
+                reason: complaint.reason,
+                kinds: complaint.kinds.clone(),
+                stored: complaint.stored,
+            });
+        }
+    }
+    Ok(refused)
+}
+
+/// Convert one number into `kind`'s canonical unit, or say why it cannot be.
+fn canonical(units: &str, kind: MetricKind, raw: f64) -> Result<f64, QuarantineReason> {
+    // Before conversion, which would happily pass a NaN through its fast path.
+    //
+    // Not reachable across the wire today — `serde_json` rejects a non-finite
+    // literal at parse and `Number::from_f64` refuses to build one — so this
+    // is defense in depth against an in-process caller or a future
+    // `arbitrary_precision`, not a live defect. `backend_integration_test`
+    // pins the wire-level property this rests on.
+    if !raw.is_finite() {
+        return Err(QuarantineReason::NonFiniteValue);
+    }
+    convert_to_canonical(units, kind, raw, Producer::HealthAutoExport)
+        .ok_or(QuarantineReason::UnconvertibleUnit)
+}
+
+/// [`canonical`] for an optional `min`/`max` column: absent stays absent, and
+/// a bound that will not convert is dropped rather than stored raw.
+fn canonical_bound(
+    units: &str,
+    kind: MetricKind,
+    raw: Option<f64>,
+) -> (Option<f64>, Option<QuarantineReason>) {
+    match raw.map(|raw| canonical(units, kind, raw)) {
+        None => (None, None),
+        Some(Ok(value)) => (Some(value), None),
+        Some(Err(reason)) => (None, Some(reason)),
+    }
+}
+
+/// The live path's counterpart to the import report's fraction tripwire.
+///
+/// HAE's percent convention is UNVERIFIED (healthie-t58) and
+/// [`Producer::HealthAutoExport`] assumes 0-100, which preserves what this path
+/// did before it converted at all. If that assumption is wrong the stored
+/// number is 100x low and *nothing else notices* — a `0.303` body fat is
+/// comfortably inside every plausibility bound. So say so, on the first push,
+/// where the answer will be sitting in the log.
+fn warn_if_percent_looks_like_a_fraction(kind: MetricKind, value: f64) {
+    if kind.unit() == "%" && value > 0.0 && value <= 1.0 {
+        tracing::warn!(
+            ?kind,
+            value,
+            "percent-typed metric arrived at or below 1.0 — HAE may be sending 0-1 fractions, \
+             which this build does NOT scale (healthie-t58)"
+        );
+    }
 }
 
 /// Parse a `YYYY-MM-DD HH:MM:SS ±HHMM` stamp into an offset-aware instant.
@@ -278,15 +577,28 @@ fn scalar_or_aggregate(point: &serde_json::Value) -> Option<(f64, Option<f64>, O
     Some((avg, min, max))
 }
 
-fn track_range(min: &mut Option<NaiveDate>, max: &mut Option<NaiveDate>, date: NaiveDate) {
-    *min = Some(min.map_or(date, |m| m.min(date)));
-    *max = Some(max.map_or(date, |m| m.max(date)));
-}
-
-fn warn_on_unit_mismatch(kind: MetricKind, hae_units: Option<&str>) {
-    if let Some(u) = hae_units.filter(|u| *u != kind.unit()) {
-        tracing::warn!(?kind, expected = kind.unit(), got = u, "HAE unit mismatch");
-    }
+/// Retire the complaint for `(raw_name, date)` once that key has stored
+/// cleanly.
+///
+/// A quarantine row is a standing complaint about a specific day's reading. A
+/// widened bound or a new unit spelling plus a re-POST resolves it, and upsert
+/// never deletes — so without this, every recovery leaves litter behind
+/// forever, and "quarantine stays exceptional" (ADR-0005 §4) stops being true.
+///
+/// A *persistent* cause still accrues one row per day, which is the complaint
+/// working, not litter. Scoped by exact HAE name, so it can never reach an
+/// `HK…` row the backfill wrote.
+async fn clear_quarantine<C: ConnectionTrait>(
+    db: &C,
+    raw_name: &str,
+    date: NaiveDate,
+) -> DomainResult<()> {
+    quarantined_metric::Entity::delete_many()
+        .filter(quarantined_metric::Column::RawName.eq(raw_name))
+        .filter(quarantined_metric::Column::Date.eq(date))
+        .exec(db)
+        .await?;
+    Ok(())
 }
 
 /// Upsert one `daily_metric` row on `(kind, date)` (last-write-wins). Branches
@@ -392,7 +704,7 @@ mod tests {
     use crate::{
         entities::{
             daily_metric::{self, MetricKind},
-            quarantined_metric,
+            quarantined_metric::{self, QuarantineReason},
         },
         test_support::{date, test_db},
     };
@@ -545,7 +857,8 @@ mod tests {
         let db = test_db().await;
         let one = |v: f64| {
             payload(serde_json::json!([
-                { "name": "weight_body_mass", "data": [{ "date": "2026-07-28 00:00:00 -0700", "qty": v }] }
+                { "name": "weight_body_mass", "units": "lb",
+                  "data": [{ "date": "2026-07-28 00:00:00 -0700", "qty": v }] }
             ]))
         };
         ingest_hae(&db, one(234.0)).await.expect("first");
@@ -589,7 +902,7 @@ mod tests {
         let report = ingest_hae(
             &db,
             payload(serde_json::json!([
-                { "name": "weight_body_mass", "data": [{ "qty": 200.0 }] }
+                { "name": "weight_body_mass", "units": "lb", "data": [{ "qty": 200.0 }] }
             ])),
         )
         .await
@@ -604,13 +917,249 @@ mod tests {
         );
     }
 
+    /// healthie-ei8: the live path used to log a warning and store the number
+    /// as though it had always been canonical. 100 kg stored as 100 lb is a
+    /// 2.2x error no later reader can detect.
+    #[tokio::test]
+    async fn a_kg_declared_weight_is_converted_not_stored_raw() {
+        let db = test_db().await;
+        let report = ingest_hae(
+            &db,
+            payload(serde_json::json!([
+                { "name": "weight_body_mass", "units": "kg",
+                  "data": [{ "date": "2026-07-28 00:00:00 -0700", "qty": 100.0 }] }
+            ])),
+        )
+        .await
+        .expect("ingest");
+        assert_eq!(report.ingested, 1);
+        assert!(report.refused.is_empty(), "kg converts, it does not refuse");
+        let rows = daily_metric::Entity::find().all(&db).await.unwrap();
+        assert!(
+            (rows[0].value - 220.462_262_184_877_6).abs() < 1e-9,
+            "100 kg must land as pounds, got {}",
+            rows[0].value
+        );
+    }
+
+    /// An aggregate's spread is in the same declared unit as its average, and
+    /// used to be stored untouched even when the average was converted.
+    #[tokio::test]
+    async fn aggregate_bounds_are_converted_with_the_value() {
+        let db = test_db().await;
+        ingest_hae(
+            &db,
+            payload(serde_json::json!([
+                { "name": "weight_body_mass", "units": "kg",
+                  "data": [{ "date": "2026-07-28 00:00:00 -0700",
+                             "Avg": 100.0, "Min": 99.0, "Max": 101.0 }] }
+            ])),
+        )
+        .await
+        .expect("ingest");
+        let rows = daily_metric::Entity::find().all(&db).await.unwrap();
+        assert!((rows[0].min.unwrap() - 218.257).abs() < 0.01);
+        assert!((rows[0].max.unwrap() - 222.667).abs() < 0.01);
+    }
+
+    /// A unit outside the vocabulary must be held, not coerced — and the row
+    /// must carry the declared unit, because HAE puts `units` on the metric
+    /// and the point alone would not say what went wrong.
+    #[tokio::test]
+    async fn an_unconvertible_unit_quarantines_with_what_a_fix_needs() {
+        let db = test_db().await;
+        let report = ingest_hae(
+            &db,
+            payload(serde_json::json!([
+                { "name": "weight_body_mass", "units": "furlong",
+                  "data": [{ "date": "2026-07-28 00:00:00 -0700", "qty": 234.0 }] }
+            ])),
+        )
+        .await
+        .expect("ingest");
+        assert_eq!(report.ingested, 0);
+        assert!(
+            daily_metric::Entity::find()
+                .all(&db)
+                .await
+                .unwrap()
+                .is_empty(),
+            "nothing storable, so nothing stored"
+        );
+        assert_eq!(report.refused.len(), 1);
+        assert_eq!(
+            report.refused[0].reason,
+            QuarantineReason::UnconvertibleUnit
+        );
+        assert_eq!(report.refused[0].kinds, vec![MetricKind::Weight]);
+        assert!(!report.refused[0].stored);
+
+        let rows = quarantined_metric::Entity::find().all(&db).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].raw_name, "weight_body_mass");
+        assert_eq!(rows[0].raw_point["qty"], 234.0, "the point, verbatim");
+        assert_eq!(rows[0].raw_point["_import"]["reason"], "unconvertible-unit");
+        assert_eq!(
+            rows[0].raw_point["_import"]["units"], "furlong",
+            "units live on the metric, so the point alone could not say"
+        );
+        assert_eq!(rows[0].raw_point["_import"]["kinds"][0], "weight");
+    }
+
+    /// No unit means no way to know what the number means. HAE's wire format
+    /// always carries one, so assuming canonical would be guessing at exactly
+    /// the moment the producer changed shape.
+    #[tokio::test]
+    async fn a_metric_with_no_declared_units_quarantines() {
+        let db = test_db().await;
+        let report = ingest_hae(
+            &db,
+            payload(serde_json::json!([
+                { "name": "weight_body_mass",
+                  "data": [{ "date": "2026-07-28 00:00:00 -0700", "qty": 234.0 }] }
+            ])),
+        )
+        .await
+        .expect("ingest");
+        assert_eq!(report.ingested, 0);
+        assert_eq!(report.refused[0].reason, QuarantineReason::MissingUnit);
+        assert_eq!(
+            quarantined_metric::Entity::find()
+                .all(&db)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// Sleep's declared unit applies to every stage field in the point, and
+    /// was previously ignored outright.
+    #[tokio::test]
+    async fn sleep_stage_hours_are_converted_from_the_declared_unit() {
+        let db = test_db().await;
+        ingest_hae(
+            &db,
+            payload(serde_json::json!([
+                { "name": "sleep_analysis", "units": "min",
+                  "data": [{ "date": "2026-07-28 00:00:00 -0700",
+                             "totalSleep": 366.0, "deep": 78.0 }] }
+            ])),
+        )
+        .await
+        .expect("ingest");
+        let rows = daily_metric::Entity::find().all(&db).await.unwrap();
+        let total = rows
+            .iter()
+            .find(|r| r.kind == MetricKind::SleepTotal)
+            .unwrap();
+        assert!(
+            (total.value - 6.1).abs() < 1e-9,
+            "366 minutes is 6.1 hours, got {}",
+            total.value
+        );
+    }
+
+    /// ADR-0002's posture, at point granularity: one metric being unusable
+    /// must not cost the push everything else it carried.
+    #[tokio::test]
+    async fn one_bad_point_does_not_cost_the_days_other_metrics() {
+        let db = test_db().await;
+        let report = ingest_hae(
+            &db,
+            payload(serde_json::json!([
+                { "name": "weight_body_mass", "units": "furlong",
+                  "data": [{ "date": "2026-07-28 00:00:00 -0700", "qty": 234.0 }] },
+                { "name": "step_count", "units": "count",
+                  "data": [{ "date": "2026-07-28 00:00:00 -0700", "qty": 8400.0 }] },
+                { "name": "heart_rate", "units": "count/min",
+                  "data": [{ "date": "2026-07-28 00:00:00 -0700",
+                             "Avg": 61.0, "Min": 48.0, "Max": 130.0 }] }
+            ])),
+        )
+        .await
+        .expect("ingest");
+        assert_eq!(report.ingested, 2, "the two good metrics still land");
+        assert_eq!(report.refused.len(), 1);
+        let kinds: Vec<_> = daily_metric::Entity::find()
+            .all(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.kind)
+            .collect();
+        assert!(kinds.contains(&MetricKind::Steps));
+        assert!(kinds.contains(&MetricKind::HeartRate));
+        assert!(!kinds.contains(&MetricKind::Weight));
+    }
+
+    /// A resolved complaint must not outlive its cause: upsert never deletes,
+    /// so without the sweep every recovery would leave a row behind claiming a
+    /// problem that no longer exists.
+    #[tokio::test]
+    async fn a_clean_re_push_retires_the_quarantine_row_it_replaces() {
+        let db = test_db().await;
+        let one = |units: &str| {
+            payload(serde_json::json!([
+                { "name": "weight_body_mass", "units": units,
+                  "data": [{ "date": "2026-07-28 00:00:00 -0700", "qty": 234.0 }] }
+            ]))
+        };
+        ingest_hae(&db, one("furlong")).await.expect("first");
+        assert_eq!(
+            quarantined_metric::Entity::find()
+                .all(&db)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        ingest_hae(&db, one("lb")).await.expect("second");
+        assert!(
+            quarantined_metric::Entity::find()
+                .all(&db)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the day now stores cleanly, so the complaint is retired"
+        );
+        assert_eq!(
+            daily_metric::Entity::find().all(&db).await.unwrap().len(),
+            1
+        );
+    }
+
+    /// HAE's percent convention is unverified (healthie-t58), so the live path
+    /// must not invent one: whatever arrives is what is stored. This is the
+    /// test that flips on the day the question is answered.
+    #[tokio::test]
+    async fn percent_kinds_keep_the_scale_they_arrive_with() {
+        let db = test_db().await;
+        ingest_hae(
+            &db,
+            payload(serde_json::json!([
+                { "name": "body_fat_percentage", "units": "%",
+                  "data": [{ "date": "2026-07-28 00:00:00 -0700", "qty": 30.3 }] }
+            ])),
+        )
+        .await
+        .expect("ingest");
+        let rows = daily_metric::Entity::find().all(&db).await.unwrap();
+        assert!(
+            (rows[0].value - 30.3).abs() < f64::EPSILON,
+            "HAE is assumed to send 0-100 already; nothing scales it"
+        );
+    }
+
     #[tokio::test]
     async fn aggregate_without_min_max_stores_avg_only() {
         let db = test_db().await;
         ingest_hae(
             &db,
             payload(serde_json::json!([
-                { "name": "heart_rate", "data": [{ "date": "2026-07-28 00:00:00 -0700", "Avg": 61.0 }] }
+                { "name": "heart_rate", "units": "count/min",
+                  "data": [{ "date": "2026-07-28 00:00:00 -0700", "Avg": 61.0 }] }
             ])),
         )
         .await

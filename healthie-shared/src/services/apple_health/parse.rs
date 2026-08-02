@@ -31,7 +31,10 @@ use super::{
 use crate::{
     entities::{daily_metric::MetricKind, quarantined_metric::QuarantineReason},
     error::{DomainError, DomainResult},
-    services::{metrics::parse_local, units::convert_to_canonical},
+    services::{
+        metrics::parse_local,
+        units::{Producer, convert_to_canonical},
+    },
 };
 
 /// The only element this parser acts on.
@@ -275,7 +278,7 @@ fn fold_quantity(
         );
         return;
     };
-    let Some(value) = convert_to_canonical(unit, kind, raw) else {
+    let Some(value) = convert_to_canonical(unit, kind, raw, Producer::AppleExportXml) else {
         *stats
             .unconvertible
             .entry((ty.to_owned(), unit.to_owned()))

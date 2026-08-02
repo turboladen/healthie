@@ -141,9 +141,12 @@ pub enum MetricKind {
 
 impl MetricKind {
     /// Canonical unit for this metric, derived from the kind (never stored).
-    /// Ingest logs a warning when HAE's `units` string disagrees. The match is
-    /// exhaustive with no wildcard on purpose: a new variant fails to compile
-    /// until it declares a unit.
+    ///
+    /// Both intakes **convert** an incoming value into this unit and refuse the
+    /// point when they cannot (`services::units`); neither stores a number in
+    /// whatever unit it happened to arrive in. The match is exhaustive with no
+    /// wildcard on purpose: a new variant fails to compile until it declares a
+    /// unit.
     #[must_use]
     pub fn unit(self) -> &'static str {
         match self {
