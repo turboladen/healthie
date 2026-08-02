@@ -614,6 +614,26 @@ async fn clear_quarantine<C: ConnectionTrait>(
 /// Upsert one `daily_metric` row on `(kind, date)` (last-write-wins). Branches
 /// `insert`/`update` explicitly — never `.save()` with a `Set` PK.
 ///
+/// # A write replaces the WHOLE row, `min`/`max`/`source` included
+///
+/// So a later scalar push for a kind that previously landed an aggregate
+/// clears the stored spread rather than keeping it. That is deliberate
+/// (healthie-c47), and it is the safer of the two options rather than merely
+/// the simpler one.
+///
+/// Coalescing — keeping a prior `min`/`max` when the incoming write has none —
+/// would produce a **chimera row**: today's `value` from one intake beside a
+/// spread computed months ago by another, under a `source` naming only one of
+/// them. This is not hypothetical, because the `Mean` and `Sum` policies
+/// resolve to `(value, None, None)` and the backfill writes those onto dates
+/// where a live HAE aggregate may already sit. healthie-4lf.2 thresholds on
+/// `min`/`max`; a stale bound paired with a fresh value is a silent lie with
+/// nothing on the row to mark it.
+///
+/// A row is therefore exactly one intake's complete account of one day, never
+/// a merge of two. ADR-0007 records this as a clarification of ADR-0005 §5,
+/// which describes the row upserting and is silent about columns.
+///
 /// Returns the row as it stood **before** this write, or `None` if this was an
 /// insert. The lookup happens either way, so returning it is free; the Apple
 /// Health backfill uses it to report how far its reconstructed values diverge
@@ -878,6 +898,55 @@ mod tests {
         assert!(
             (rows[0].value - 232.5).abs() < f64::EPSILON,
             "last write wins"
+        );
+    }
+
+    /// healthie-c47: a write is one intake's WHOLE account of a day.
+    ///
+    /// A scalar push after an aggregate clears the spread rather than keeping
+    /// it. Preserving it would pair today's value with a spread computed by
+    /// some other run — a row that describes no single measurement, under a
+    /// `source` naming only one of them, with nothing to mark it as a merge.
+    #[tokio::test]
+    async fn a_write_replaces_the_whole_row_not_only_the_columns_it_supplies() {
+        let db = test_db().await;
+        ingest_hae(
+            &db,
+            payload(serde_json::json!([
+                { "name": "heart_rate", "units": "count/min",
+                  "data": [{ "date": "2026-07-28 00:00:00 -0700",
+                             "Avg": 61.0, "Min": 48.0, "Max": 130.0, "source": "Apple Watch" }] }
+            ])),
+        )
+        .await
+        .expect("aggregate");
+        let rows = daily_metric::Entity::find().all(&db).await.unwrap();
+        assert_eq!((rows[0].min, rows[0].max), (Some(48.0), Some(130.0)));
+
+        // A scalar for the same (kind, date) — the shape the backfill's Mean
+        // and Sum policies produce, and a re-push of a day HAE rolled up
+        // differently.
+        ingest_hae(
+            &db,
+            payload(serde_json::json!([
+                { "name": "heart_rate", "units": "count/min",
+                  "data": [{ "date": "2026-07-28 00:00:00 -0700", "qty": 58.0 }] }
+            ])),
+        )
+        .await
+        .expect("scalar");
+
+        let rows = daily_metric::Entity::find().all(&db).await.unwrap();
+        assert_eq!(rows.len(), 1, "still one row for the day");
+        assert!((rows[0].value - 58.0).abs() < f64::EPSILON);
+        assert_eq!(
+            (rows[0].min, rows[0].max),
+            (None, None),
+            "a spread this write did not measure must not survive under its value"
+        );
+        assert_eq!(
+            rows[0].source, None,
+            "and neither may the device credited with measuring it"
         );
     }
 
