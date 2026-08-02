@@ -72,6 +72,7 @@ pub async fn hae(
             ingested = report.ingested,
             quarantined = ?report.quarantined,
             range = ?report.date_range,
+            quarantine_retired = report.quarantine_retired,
             "hae ingest",
         );
     } else {
@@ -80,8 +81,12 @@ pub async fn hae(
             quarantined = ?report.quarantined,
             range = ?report.date_range,
             bounds_cleared = report.bounds_cleared,
+            quarantine_retired = report.quarantine_retired,
             refused = ?report.refused,
-            "hae ingest refused points — they are held verbatim in quarantined_metric",
+            // Deliberately not "refused points": a cleared bound still stores
+            // its row, and `Refusal::stored` says which happened. Claiming
+            // nothing landed would be worse than saying less.
+            "hae ingest held some readings back — see refused; the points are in quarantined_metric",
         );
     }
     Ok(StatusCode::NO_CONTENT)

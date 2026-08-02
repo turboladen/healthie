@@ -1,8 +1,17 @@
-//! HAE ingest (ADR-0005): map Health Auto Export metric names to curated
-//! [`MetricKind`]s, explode `sleep_analysis` into per-stage sub-metrics, and
-//! quarantine genuinely unknown names. All persistence flows through
-//! [`ingest_hae`] in one transaction; the mapping/extraction helpers below are
-//! pure so they can be unit-tested without a database.
+//! HAE ingest (ADR-0005, ADR-0007): map Health Auto Export metric names to
+//! curated [`MetricKind`]s, explode `sleep_analysis` into per-stage
+//! sub-metrics, convert every value into the kind's canonical unit, and refuse
+//! what cannot be stored.
+//!
+//! Three things are quarantined rather than stored, and none of them is
+//! silent: a name never seen before, a point whose unit is missing or outside
+//! the vocabulary, and a value outside what the kind can physically be. The
+//! refused point is held verbatim because this path has no file on disk to
+//! re-read — the POST body is gone once the handler returns.
+//!
+//! All persistence flows through [`ingest_hae`] in one transaction; the
+//! mapping/extraction helpers below are pure so they can be unit-tested
+//! without a database.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -167,6 +176,11 @@ pub struct IngestReport {
     /// Rows that stored, but with an `min`/`max` column dropped because that
     /// number alone could not be trusted. The row's `value` is unaffected.
     pub bounds_cleared: usize,
+    /// Standing quarantine rows deleted because their `(name, date)` stored
+    /// cleanly this time. Reported because this push DELETES those rows, and a
+    /// run that silently retired forty complaints should not look identical to
+    /// one that retired none.
+    pub quarantine_retired: usize,
 }
 
 /// One curated point that could not be stored as it arrived.
@@ -178,7 +192,9 @@ pub struct Refusal {
     /// The kinds refused. Several when one `sleep_analysis` point explodes and
     /// only some stages were impossible.
     pub kinds: Vec<MetricKind>,
-    /// Whether a row still landed — true when only a bound was dropped.
+    /// Whether a row still landed for this `(name, date)` — true when a bound
+    /// was dropped rather than the point refused. A day carrying both outcomes
+    /// reports `true`, because a row is in fact there.
     pub stored: bool,
 }
 
@@ -371,9 +387,10 @@ impl Ingest {
         let refused = persist_complaints(db, &self.complaints, now).await?;
         // Only keys with no complaint at all: a day that stored five sleep
         // stages and refused one still has something to say.
+        let mut quarantine_retired = 0u64;
         for (name, date) in &self.settled {
             if !self.complaints.contains_key(&(name.clone(), *date)) {
-                clear_quarantine(db, name, *date).await?;
+                quarantine_retired += clear_quarantine(db, name, *date).await?;
             }
         }
         Ok(IngestReport {
@@ -382,6 +399,7 @@ impl Ingest {
             date_range: self.min_date.zip(self.max_date),
             refused,
             bounds_cleared: self.bounds_cleared,
+            quarantine_retired: usize::try_from(quarantine_retired).unwrap_or(usize::MAX),
         })
     }
 
@@ -401,6 +419,13 @@ impl Ingest {
         complain(&mut self.complaints, key, point, reason, units, kind);
     }
 
+    /// [`Self::complain`] for a point that still stored a row — only a bound
+    /// was dropped.
+    ///
+    /// `stored` latches on regardless of what else this key has recorded. A
+    /// day can carry both a fully refused point and a partially stored one,
+    /// and a row genuinely landed, so reporting otherwise would contradict the
+    /// database over which of two points happened to come first in the array.
     fn complain_stored(
         &mut self,
         key: (&str, NaiveDate),
@@ -409,20 +434,21 @@ impl Ingest {
         units: Option<&str>,
         kind: Option<MetricKind>,
     ) {
-        complain_stored(&mut self.complaints, key, point, reason, units, kind);
+        complain(&mut self.complaints, key, point, reason, units, kind).stored = true;
     }
 }
 
-/// Record that `(name, date)` could not be fully stored. Merges into whatever
-/// this key already holds, so a point refused for several kinds lands one row.
-fn complain(
-    complaints: &mut BTreeMap<(String, NaiveDate), Complaint>,
+/// Record that `(name, date)` could not be fully stored, returning the running
+/// complaint. Merges into whatever this key already holds, so a point refused
+/// for several kinds lands one row.
+fn complain<'a>(
+    complaints: &'a mut BTreeMap<(String, NaiveDate), Complaint>,
     (name, date): (&str, NaiveDate),
     point: &serde_json::Value,
     reason: QuarantineReason,
     units: Option<&str>,
     kind: Option<MetricKind>,
-) {
+) -> &'a mut Complaint {
     let entry = complaints
         .entry((name.to_owned(), date))
         .or_insert_with(|| Complaint {
@@ -437,23 +463,7 @@ fn complain(
     {
         entry.kinds.push(kind);
     }
-}
-
-/// [`complain`] for a point that still stored a row — only a bound was dropped.
-fn complain_stored(
-    complaints: &mut BTreeMap<(String, NaiveDate), Complaint>,
-    key: (&str, NaiveDate),
-    point: &serde_json::Value,
-    reason: QuarantineReason,
-    units: Option<&str>,
-    kind: Option<MetricKind>,
-) {
-    let existing = complaints.contains_key(&(key.0.to_owned(), key.1));
-    complain(complaints, key, point, reason, units, kind);
-    // Only claim "stored" for a key nothing else has already refused outright.
-    if !existing && let Some(entry) = complaints.get_mut(&(key.0.to_owned(), key.1)) {
-        entry.stored = true;
-    }
+    entry
 }
 
 /// Write every accumulated complaint, and describe them for the report.
@@ -602,13 +612,16 @@ async fn clear_quarantine<C: ConnectionTrait>(
     db: &C,
     raw_name: &str,
     date: NaiveDate,
-) -> DomainResult<()> {
-    quarantined_metric::Entity::delete_many()
+) -> DomainResult<u64> {
+    let result = quarantined_metric::Entity::delete_many()
         .filter(quarantined_metric::Column::RawName.eq(raw_name))
         .filter(quarantined_metric::Column::Date.eq(date))
         .exec(db)
         .await?;
-    Ok(())
+    // `rows_affected`, not the number of keys we asked about: on the one
+    // operation here that destroys a row, the count reported is what actually
+    // happened rather than what was intended.
+    Ok(result.rows_affected)
 }
 
 /// Upsert one `daily_metric` row on `(kind, date)` (last-write-wins). Branches
@@ -1194,7 +1207,11 @@ mod tests {
             1
         );
 
-        ingest_hae(&db, one("lb")).await.expect("second");
+        let report = ingest_hae(&db, one("lb")).await.expect("second");
+        assert_eq!(
+            report.quarantine_retired, 1,
+            "a run that deletes a standing complaint must say that it did"
+        );
         assert!(
             quarantined_metric::Entity::find()
                 .all(&db)
@@ -1274,6 +1291,44 @@ mod tests {
             1,
             "the discarded number is still recoverable"
         );
+    }
+
+    /// Two points on one `(name, date)` with different fates. `quarantined_metric`
+    /// is keyed per day while refusals are per point, so the reported outcome
+    /// must describe the database rather than whichever point came first in the
+    /// array.
+    #[tokio::test]
+    async fn a_day_that_both_refused_and_stored_reports_that_a_row_landed() {
+        let db = test_db().await;
+        let refused_first = serde_json::json!([
+            { "name": "blood_oxygen_saturation", "units": "%", "data": [
+                { "date": "2026-07-28 00:00:00 -0700", "qty": 0.0 },
+                { "date": "2026-07-28 00:00:00 -0700", "Avg": 96.4, "Min": 0.0, "Max": 99.0 }
+            ] }
+        ]);
+        let mut reversed = refused_first.clone();
+        reversed[0]["data"].as_array_mut().unwrap().reverse();
+
+        for (order, metrics) in [("refused first", refused_first), ("stored first", reversed)] {
+            let db = if order == "refused first" {
+                &db
+            } else {
+                &test_db().await
+            };
+            let report = ingest_hae(db, payload(metrics)).await.expect("ingest");
+            let rows = daily_metric::Entity::find().all(db).await.unwrap();
+            assert_eq!(rows.len(), 1, "{order}: the good aggregate still lands");
+            assert!((rows[0].value - 96.4).abs() < f64::EPSILON, "{order}");
+            assert_eq!(
+                rows[0].min, None,
+                "{order}: the impossible floor is dropped"
+            );
+            assert_eq!(report.refused.len(), 1, "{order}: one day, one complaint");
+            assert!(
+                report.refused[0].stored,
+                "{order}: a row IS in the table, so the report must not say otherwise"
+            );
+        }
     }
 
     /// An impossible `value` has nothing storable in it, so no row lands.

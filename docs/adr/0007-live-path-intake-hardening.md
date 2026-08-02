@@ -213,19 +213,36 @@ nothing on the row to mark it.
   `warn` when a push refused anything, so a metric that starts failing on every
   push is visible on the first unattended day rather than discovered in a trend
   months later.
-- **Measured, not asserted:** against Steve's real 50,877-row import the bounds
-  refuse 63 rows on `value` (40 body-fat, 23 spo2, all reading 0.0), 3 sleep
-  rows, and clear bounds on 2 more — 0.13% of rows, every one a confirmed
-  artifact — while preserving 245 legitimate zeros. Every value in the
-  plausibility regression test is one of those measured extremes, so a future
-  tightening has to argue with real data.
+- **Measured, not asserted:** re-importing Steve's real 3.2 GB export under
+  these rules wrote 50,812 rows against 50,877 before — **65 fewer, 0.13%**, and
+  every one a confirmed artifact: 40 `body-fat` and 23 `spo2` days reading
+  exactly 0.0, the 49.877 h night, and the 52.953 h time-in-bed. All 245
+  legitimate zeros survived. `spo2`'s stored floor moved from 0.000 to 90.667
+  and its `min` column from 0.000 to 79.0 — a real desaturation low, kept.
+  Daily means shifted where per-record exclusion changed the average (`spo2`
+  +2.278, `body-fat` +1.054), which is the intended effect and not a
+  regression. Every value in the plausibility regression test is one of those
+  measured extremes, so a future tightening has to argue with real data.
+- **The record-level check did all the work.** `bounds_cleared` was **zero** on
+  the real import: excluding artifact readings before the fold meant no rollup
+  ever had to drop a column, so days kept a genuine `min` instead of an empty
+  one. The row-level bound clearing exists for the live path, where readings
+  arrive pre-aggregated and there is nothing finer to exclude.
 - **Negative / limits:** a cleared `min` is indistinguishable from a row that
-  never had one (§4). Bounds cannot detect a scale error (§3). Rows already
-  stored by an earlier import are not cleaned up by this change — upsert never
-  deletes, so the 63 bad rows survive until a re-import, where they surface as
-  `stale_rows` and `--replace-range` removes them. HAE's percent convention
-  remains unverified (healthie-t58), and until it is settled the live and import
-  paths can disagree by 100x on the four percent kinds.
+  never had one (§4). Bounds cannot detect a scale error (§3). HAE's percent
+  convention remains unverified (healthie-t58), and until it is settled the live
+  and import paths can disagree by 100x on the four percent kinds.
+- **Nothing here cleans up rows already stored,** and the available remedy is
+  narrower than it looks. Upsert never deletes, so a row an earlier run wrote
+  from a value these bounds now refuse simply stays, holding a normal-looking
+  number. On the **import** path a re-run surfaces it as a `stale_row` and
+  `--replace-range` deletes it — but only for kinds that run still produces, and
+  only inside that kind's own surviving date range (`find_stale_rows`). On the
+  **live** path there is no equivalent sweep at all: `clear_quarantine` retires
+  resolved _complaints_, not superseded `daily_metric` rows. A day whose value
+  is now refused keeps whatever was stored for it, with nothing on the row to
+  mark it. Cleaning up the 65 rows already in an imported store is therefore a
+  deliberate follow-up, not something this change does.
 - **Enforced by shape, not by a check:** a new `MetricKind` cannot ship without
   bounds, because the match is exhaustive with no wildcard — the same mechanism
   that already forces it to declare a unit and an aggregation policy. And a

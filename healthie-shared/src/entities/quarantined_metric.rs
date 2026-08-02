@@ -1,10 +1,23 @@
-//! Verbatim HAE data points whose metric name is neither curated nor explicitly
-//! excluded (ADR-0002 "never silently dropped", ADR-0005). Write-once per
-//! `(raw_name, date)` — the durable discovery surface for metrics Apple/HAE add
-//! later. Because curation is broad and declines are explicit, landing a row
-//! here is exceptional, not routine.
+//! Verbatim data points an intake would not store (ADR-0002 "never silently
+//! dropped", ADR-0005 §4, ADR-0007). Upserted per `(raw_name, date)` — the
+//! durable record of everything refused, and the discovery surface for metrics
+//! Apple/HAE add later.
+//!
+//! Two kinds of row live here, told apart by `raw_point._import.reason`:
+//!
+//! - A name that is **neither curated nor explicitly excluded**. This is the
+//!   discovery case ADR-0005 §4 describes.
+//! - A **curated** name whose point could not be stored anyway — its unit was
+//!   missing or unconvertible, or its value was not physically possible
+//!   (ADR-0007 §1, §3). The name is understood; this specific reading is not
+//!   trustworthy, and refusing it silently would be the coercion ADR-0006 §6
+//!   forbids on the other path.
+//!
+//! Landing here stays exceptional either way: curation is broad, declines are
+//! explicit, and a complaint is retired once the same `(raw_name, date)` stores
+//! cleanly.
 
-use sea_orm::entity::prelude::*;
+use sea_orm::{ActiveEnum, entity::prelude::*};
 use serde::{Deserialize, Serialize};
 
 use crate::entities::daily_metric::MetricKind;
@@ -17,7 +30,9 @@ pub const IMPORT_META_KEY: &str = "_import";
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
-    /// The unrecognized HAE metric name (`snake_case`, as received).
+    /// The metric name as received — HAE's `snake_case`, or Apple's `HK…`
+    /// identifier. Usually one the vocabulary does not know, but a curated name
+    /// lands here too when its point was refused; `_import.reason` says which.
     pub raw_name: String,
     /// The local calendar day parsed from the point (never UTC-shifted).
     pub date: Date,
@@ -155,13 +170,17 @@ impl QuarantineMeta<'_> {
     }
 }
 
-/// A kind's stored spelling, taken from its own serde rename so the quarantine
-/// row and the `daily_metric.kind` column can never disagree.
+/// A kind's stored spelling, taken from the **same** `DeriveActiveEnum` value
+/// the `daily_metric.kind` column stores.
+///
+/// Deliberately not `serde_json::to_value`, which would read the `#[serde(rename
+/// = …)]` attribute — a second, parallel spelling list. The two agree today only
+/// by convention, so reading the serde one would let a future edit to one
+/// attribute and not the other put `gait_asymmetry` in a quarantine row against
+/// a `gait-asymmetry` column, with nothing failing. `to_value` is also
+/// infallible, so there is no fallback spelling to get wrong either.
 fn kind_slug(kind: MetricKind) -> String {
-    serde_json::to_value(kind)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_else(|| format!("{kind:?}"))
+    kind.to_value()
 }
 
 #[cfg(test)]
