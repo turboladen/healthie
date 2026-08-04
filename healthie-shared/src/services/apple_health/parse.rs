@@ -25,14 +25,17 @@ use quick_xml::{
 use serde_json::{Map, Value};
 
 use super::{
-    accumulate::{Accumulator, Interval, daily_agg},
+    accumulate::{Accumulator, Interval, RefusedTally, daily_agg},
     mapping::{HkMapping, map_hk_name, map_sleep_stage},
-    units::convert_to_canonical,
 };
 use crate::{
-    entities::daily_metric::MetricKind,
+    entities::{daily_metric::MetricKind, quarantined_metric::QuarantineReason},
     error::{DomainError, DomainResult},
-    services::metrics::parse_local,
+    services::{
+        metrics::parse_local,
+        plausibility,
+        units::{Producer, convert_to_canonical},
+    },
 };
 
 /// The only element this parser acts on.
@@ -41,62 +44,6 @@ const RECORD: &[u8] = b"Record";
 /// How often to emit a progress line; a multi-GB parse takes minutes and should
 /// not look hung.
 const PROGRESS_EVERY: u64 = 1_000_000;
-
-/// Why a record could not be stored, recorded in `raw_point._import.reason`.
-///
-/// A closed vocabulary, so an enum rather than bare string literals: the
-/// spellings are written here and read back in
-/// [`clear_promoted_quarantine`](super::clear_promoted_quarantine), and a typo
-/// on either side would silently disable the quarantine sweep — a failure with
-/// no symptom other than a stale row nobody looks at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum QuarantineReason {
-    /// The `type` attribute is not in the curated vocabulary.
-    UnknownType,
-    /// A `HKCategoryValueSleepAnalysis*` spelling we do not know.
-    UnknownSleepStage,
-    /// Curated name, but the record carried no `unit` at all.
-    MissingUnit,
-    /// Curated name, but no conversion covers its `unit`.
-    UnconvertibleUnit,
-}
-
-impl QuarantineReason {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::UnknownType => "unknown-type",
-            Self::UnknownSleepStage => "unknown-sleep-stage",
-            Self::MissingUnit => "missing-unit",
-            Self::UnconvertibleUnit => "unconvertible-unit",
-        }
-    }
-
-    /// Parse a reason back out of a stored row. `None` for anything this build
-    /// does not recognize — rows written by some future build must not be
-    /// mistaken for one of ours and swept.
-    pub(crate) fn parse(raw: &str) -> Option<Self> {
-        [
-            Self::UnknownType,
-            Self::UnknownSleepStage,
-            Self::MissingUnit,
-            Self::UnconvertibleUnit,
-        ]
-        .into_iter()
-        .find(|reason| reason.as_str() == raw)
-    }
-
-    /// Whether this reason describes the *name*, and so stops applying the
-    /// moment that name joins the vocabulary.
-    ///
-    /// Deliberately not every reason: a curated metric can also be quarantined
-    /// because one record carried an unconvertible or missing unit, and those
-    /// rows describe a live data problem that promoting the name does nothing
-    /// about. Sweeping them would erase a standing complaint just because the
-    /// metric happens to be curated.
-    pub(crate) fn is_name_based(self) -> bool {
-        matches!(self, Self::UnknownType | Self::UnknownSleepStage)
-    }
-}
 
 /// One retained example of an uncurated name, plus how often it was seen.
 ///
@@ -107,6 +54,14 @@ pub(crate) struct QuarantineSample {
     pub(crate) records_seen: u64,
     pub(crate) date: NaiveDate,
     pub(crate) point: Value,
+    /// Why this name's records could not be stored. Carried here rather than
+    /// baked into `point`, so `upsert_quarantine` stays the single writer of
+    /// the `_import` marker.
+    pub(crate) reason: QuarantineReason,
+    /// The unit the refused records declared, when they had one.
+    pub(crate) units: Option<String>,
+    /// The kind the records would have landed on; empty for an unknown name.
+    pub(crate) kinds: Vec<MetricKind>,
 }
 
 /// Counts and discoveries from one pass over the file.
@@ -122,6 +77,11 @@ pub(crate) struct ImportStats {
     /// `(type, unit)` pairs no conversion covers, with how many records each
     /// affected.
     pub(crate) unconvertible: BTreeMap<(String, String), u64>,
+    /// Readings refused as physically impossible, per kind. Counted and
+    /// reported rather than quarantined: unlike the live path, the raw records
+    /// are still on disk in `export.xml`, so a widened bound plus a re-run
+    /// recovers every one of them (ADR-0006 §7).
+    pub(crate) implausible: BTreeMap<MetricKind, RefusedTally>,
     /// Whether every element opened was also closed before EOF.
     ///
     /// A transfer of a multi-gigabyte export interrupted at a clean record
@@ -241,9 +201,10 @@ impl<'a> RawRecord<'a> {
         Some(rec)
     }
 
-    /// The record verbatim, for quarantine. `reason` records why we could not
-    /// store it; `records_seen` is filled in at persist time.
-    fn to_json(&self, reason: QuarantineReason) -> Value {
+    /// The record verbatim, for quarantine. The `_import` marker — reason,
+    /// declared units, kinds — is stamped by `upsert_quarantine`, the single
+    /// writer of it; `records_seen` is filled in at persist time.
+    fn to_json(&self) -> Value {
         let mut map = Map::new();
         for (key, val) in [
             ("type", &self.ty),
@@ -257,12 +218,6 @@ impl<'a> RawRecord<'a> {
                 map.insert(key.to_owned(), Value::String(v.clone().into_owned()));
             }
         }
-        let mut meta = Map::new();
-        meta.insert(
-            "reason".to_owned(),
-            Value::String(reason.as_str().to_owned()),
-        );
-        map.insert("_import".to_owned(), Value::Object(meta));
         Value::Object(map)
     }
 }
@@ -319,29 +274,44 @@ fn fold_quantity(
     // No unit means no way to know what the number means. Quarantine rather
     // than assume it was already canonical.
     let Some(unit) = rec.unit.as_deref() else {
-        quarantine(
+        quarantine_for_kind(
             stats,
             ty,
             QuarantineReason::MissingUnit,
             rec,
             start.date_naive(),
+            Some(kind),
         );
         return;
     };
-    let Some(value) = convert_to_canonical(unit, kind, raw) else {
+    let Some(value) = convert_to_canonical(unit, kind, raw, Producer::AppleExportXml) else {
         *stats
             .unconvertible
             .entry((ty.to_owned(), unit.to_owned()))
             .or_insert(0) += 1;
-        quarantine(
+        quarantine_for_kind(
             stats,
             ty,
             QuarantineReason::UnconvertibleUnit,
             rec,
             start.date_naive(),
+            Some(kind),
         );
         return;
     };
+    // Before the fold, not after it. Excluding the artifact READING is what
+    // lets the day keep its real minimum: a single 0.000 SpO2 sample would
+    // otherwise become the day's `min`, and refusing it only at the rollup
+    // would clear the column and lose the genuine low with it.
+    //
+    // Note this is a per-DAY table applied per record, so the ceilings are
+    // nearly vacuous here — no single record approaches 200,000 steps. What
+    // bites at this level is the lower bound, on the `AvgMinMax`/`Mean` kinds
+    // where one reading is directly comparable to a daily figure.
+    if plausibility::reject_reason(kind, value).is_some() {
+        RefusedTally::note(&mut stats.implausible, kind, value, start.date_naive()).records += 1;
+        return;
+    }
     let Some(agg) = daily_agg(kind) else {
         // Unreachable by construction: `map_hk_name` never returns `Curated`
         // for a sleep kind. Reported rather than panicked in a long backfill.
@@ -402,13 +372,30 @@ fn quarantine(
     rec: &RawRecord<'_>,
     date: NaiveDate,
 ) {
+    quarantine_for_kind(stats, name, reason, rec, date, None);
+}
+
+/// [`quarantine`] for a refusal that already knows which curated kind the
+/// record would have landed on — a unit this build cannot convert, or a number
+/// the kind cannot physically take.
+fn quarantine_for_kind(
+    stats: &mut ImportStats,
+    name: &str,
+    reason: QuarantineReason,
+    rec: &RawRecord<'_>,
+    date: NaiveDate,
+    kind: Option<MetricKind>,
+) {
     let entry = stats
         .quarantined
         .entry(name.to_owned())
         .or_insert_with(|| QuarantineSample {
             records_seen: 0,
             date,
-            point: rec.to_json(reason),
+            point: rec.to_json(),
+            reason,
+            units: rec.unit.as_deref().map(str::to_owned),
+            kinds: kind.into_iter().collect(),
         });
     entry.records_seen += 1;
 }
@@ -437,6 +424,60 @@ mod tests {
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-6
+    }
+
+    /// healthie-55h's confirmed case, and the reason the check has to run per
+    /// RECORD and not only per rollup.
+    ///
+    /// A 0.000 `SpO2` sample is a sensor artifact — it is what put a 0.000 floor
+    /// on 962 days of the real import. Excluding the reading lets the day keep
+    /// its genuine low of 95; refusing it only at the rollup would have cleared
+    /// the whole `min` column and thrown the real number away with the fake
+    /// one. The mean moves too, and is supposed to.
+    #[test]
+    fn an_impossible_reading_is_excluded_so_the_day_keeps_its_real_minimum() {
+        let (rows, stats) = parse(
+            r#"<HealthData>
+              <Record type="HKQuantityTypeIdentifierOxygenSaturation" unit="%"
+                      startDate="2026-07-28 01:00:00 -0700" endDate="2026-07-28 01:00:00 -0700" value="0"/>
+              <Record type="HKQuantityTypeIdentifierOxygenSaturation" unit="%"
+                      startDate="2026-07-28 02:00:00 -0700" endDate="2026-07-28 02:00:00 -0700" value="0.95"/>
+              <Record type="HKQuantityTypeIdentifierOxygenSaturation" unit="%"
+                      startDate="2026-07-28 03:00:00 -0700" endDate="2026-07-28 03:00:00 -0700" value="0.99"/>
+            </HealthData>"#,
+        );
+        let row = row_for(&rows, MetricKind::Spo2);
+        assert!(
+            close(row.min.unwrap(), 95.0),
+            "the real low must survive, got {:?}",
+            row.min
+        );
+        assert!(close(row.max.unwrap(), 99.0));
+        assert!(
+            close(row.value, 97.0),
+            "the mean is taken over the readings that were measurements"
+        );
+        let tally = stats.implausible[&MetricKind::Spo2];
+        assert_eq!(tally.records, 1);
+        assert_eq!(tally.rows, 0, "the day still produced a row");
+        assert_eq!(tally.sample.unwrap().1, date("2026-07-28"));
+    }
+
+    /// Sleep has no per-record value to bound — a night only exists after the
+    /// interval union — so the refusal has to happen at the rollup. This is
+    /// 2023-12-29: a sleep app left running for a day and a half.
+    #[test]
+    fn a_night_longer_than_a_day_produces_no_row() {
+        let (rows, _) = parse(
+            r#"<HealthData>
+              <Record type="HKCategoryTypeIdentifierSleepAnalysis" value="HKCategoryValueSleepAnalysisAsleepUnspecified"
+                      startDate="2023-12-29 15:52:45 -0700" endDate="2023-12-31 03:59:51 -0700"/>
+            </HealthData>"#,
+        );
+        assert!(
+            !rows.iter().any(|r| r.kind == MetricKind::SleepTotal),
+            "36 hours attributed to one sleep-day is not a night"
+        );
     }
 
     #[test]
@@ -592,7 +633,11 @@ mod tests {
             "the first sighting is retained"
         );
         assert_eq!(sample.point["value"], "240");
-        assert_eq!(sample.point["_import"]["reason"], "unknown-type");
+        assert_eq!(sample.reason, QuarantineReason::UnknownType);
+        assert!(
+            sample.kinds.is_empty(),
+            "an unrecognized name has no kind to name"
+        );
     }
 
     /// A unit we cannot convert must never be stored as if it were canonical.
@@ -612,10 +657,14 @@ mod tests {
             )],
             1
         );
+        let sample = &stats.quarantined["HKQuantityTypeIdentifierBodyMass"];
+        assert_eq!(sample.reason, QuarantineReason::UnconvertibleUnit);
         assert_eq!(
-            stats.quarantined["HKQuantityTypeIdentifierBodyMass"].point["_import"]["reason"],
-            "unconvertible-unit"
+            sample.units.as_deref(),
+            Some("mmHg"),
+            "the unit that could not be converted is what a fix needs"
         );
+        assert_eq!(sample.kinds, vec![MetricKind::Weight]);
     }
 
     /// Stone is a real mass unit some locales export, and it converts — this
@@ -667,10 +716,9 @@ mod tests {
             </HealthData>"#,
         );
         assert!(rows.is_empty());
-        assert_eq!(
-            stats.quarantined["HKQuantityTypeIdentifierBodyMass"].point["_import"]["reason"],
-            "missing-unit"
-        );
+        let sample = &stats.quarantined["HKQuantityTypeIdentifierBodyMass"];
+        assert_eq!(sample.reason, QuarantineReason::MissingUnit);
+        assert_eq!(sample.units, None);
     }
 
     /// Excluded names keep quarantine exceptional: seen, declined, silent.
