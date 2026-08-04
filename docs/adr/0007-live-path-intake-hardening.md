@@ -26,7 +26,7 @@ Three specific defects:
    with `MetricKind::unit()` and then stored the number anyway. A payload
    declaring `kg` for weight was stored as if it were pounds — a 2.2x error,
    permanent, silent apart from a log line.
-2. Neither intake applied any range or sign validation. Steve's first real
+2. Neither intake applied any range or sign validation. The first real
    import surfaced a 49.88 h sleep night (verified against the raw XML: a sleep
    app left running for a day and a half) and a 0.000 SpO2 floor across 962 days
    — a reading that is not survivable. healthie-4lf.2 thresholds on exactly
@@ -67,7 +67,7 @@ direction.
 
 healthie-t58 settles it the way healthie-4u7 settled the export side: by reading
 the observed span from real data. Two close paths exist, because the first
-turned out not to be available on demand — Steve's HAE MCP server
+turned out not to be available on demand — the HAE MCP server
 (`.mcp.json`) can be read directly when the device is on the network, and
 failing that, `ingest_hae` warns whenever a percent-typed kind arrives at or
 below 1.0, which is what a fraction-sending HAE looks like. The live path has no
@@ -238,7 +238,7 @@ nothing on the row to mark it.
   `warn` when a push refused anything, so a metric that starts failing on every
   push is visible on the first unattended day rather than discovered in a trend
   months later.
-- **Measured, not asserted:** re-importing Steve's real 3.2 GB export under
+- **Measured, not asserted:** re-importing the real 3.2 GB export under
   these rules wrote 50,812 rows against 50,877 before — **65 fewer, 0.13%**, and
   every one a confirmed artifact: 40 `body-fat` and 23 `spo2` days reading
   exactly 0.0, the 49.877 h night, and the 52.953 h time-in-bed. All 245
