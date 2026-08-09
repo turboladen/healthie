@@ -97,6 +97,14 @@ copied from `../glovebox` except where an ADR says otherwise.
   connection (healthie-mcp main.rs) and in `test_db()` (healthie-38x); services
   still self-enforce referential integrity via `require()` as the backstop for
   actionable errors — keep doing so
+- Rustdoc-visible comments (`///`, `//!`) must stand alone for a reader with no
+  repo and no tracker — they render on docs.rs. NEVER put a bead ID, `ADR-NNNN`,
+  or PR number in one: a bare `ADR-0005 §4` in published docs reads as an author
+  who doesn't understand their audience. Put the reference in a plain `//`
+  comment instead, where the reader has both, or state the reason inline. `//`
+  comments SHOULD cite beads and ADRs — that provenance is worth keeping
+- ADR markdown may cross-reference other ADRs freely (they ship together); bead
+  IDs there are dangling unless `.beads/` ships too
 - Do NOT commit new `docs/superpowers/` specs/plans — decisions become ADRs in
   `docs/adr/` (immutable once accepted; supersede, don't edit); active plans stay
   untracked on disk
