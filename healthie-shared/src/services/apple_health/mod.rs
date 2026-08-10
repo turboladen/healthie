@@ -47,7 +47,6 @@
 pub(crate) mod accumulate;
 pub(crate) mod mapping;
 pub(crate) mod parse;
-pub(crate) mod units;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -63,13 +62,17 @@ use sea_orm::{
 };
 
 use self::{
-    accumulate::{Accumulator, PendingRow},
+    accumulate::{Accumulator, PendingRow, RefusedTally, Resolved},
     mapping::{is_recognized_hk_name, map_sleep_stage},
-    parse::{ImportStats, QuarantineReason},
+    parse::ImportStats,
 };
 use crate::{
     clock,
-    entities::{daily_metric, daily_metric::MetricKind, quarantined_metric},
+    entities::{
+        daily_metric,
+        daily_metric::MetricKind,
+        quarantined_metric::{self, QuarantineMeta, QuarantineReason},
+    },
     error::{DomainError, DomainResult},
     services::metrics::{upsert_metric, upsert_quarantine},
 };
@@ -98,6 +101,26 @@ pub struct ParsedExport {
 pub struct QuarantinedName {
     pub raw_name: String,
     pub records_seen: u64,
+}
+
+/// What one kind's plausibility refusals amounted to, for the operator.
+///
+/// Counted and reported rather than quarantined: the raw records are still on
+/// disk in `export.xml`, so a widened bound plus a re-run recovers all of them
+/// — the same argument ADR-0006 §7 makes for one-row-per-name.
+#[derive(Debug, Clone)]
+pub struct ImplausibleReport {
+    pub kind: MetricKind,
+    pub unit: &'static str,
+    /// Individual readings dropped before the rollup, preserving the day's
+    /// genuine minimum instead of losing the column.
+    pub records: u64,
+    /// Whole days refused — where sleep's impossible nights land.
+    pub rows: usize,
+    /// Days stored with a `min`/`max` dropped.
+    pub bounds_cleared: usize,
+    /// The first refused value seen, and its day.
+    pub sample: Option<(f64, NaiveDate)>,
 }
 
 /// A `(type, unit)` pair no conversion covers.
@@ -339,6 +362,8 @@ pub struct ImportReport {
     pub date_range: Option<(NaiveDate, NaiveDate)>,
     pub quarantined: Vec<QuarantinedName>,
     pub unconvertible: Vec<UnconvertibleUnit>,
+    /// Readings this run refused as not being measurements at all.
+    pub implausible: Vec<ImplausibleReport>,
     pub per_kind: Vec<KindReport>,
     pub sum_sources: Vec<SumSourceReport>,
     pub sleep_day_shift: SleepDayShift,
@@ -522,51 +547,98 @@ pub async fn persist_import<C: ConnectionTrait + TransactionTrait>(
         rows_overwritten,
         stale_quarantine_cleared,
         date_range: min_date.zip(max_date),
-        quarantined: stats
-            .quarantined
-            .iter()
-            .map(|(raw_name, sample)| QuarantinedName {
-                raw_name: raw_name.clone(),
-                records_seen: sample.records_seen,
-            })
-            .collect(),
-        unconvertible: stats
-            .unconvertible
-            .iter()
-            .map(|((raw_name, unit), records)| UnconvertibleUnit {
-                raw_name: raw_name.clone(),
-                unit: unit.clone(),
-                records: *records,
-            })
-            .collect(),
-        per_kind: resolved
-            .per_kind
-            .iter()
-            .map(|(kind, summary)| KindReport {
-                kind: *kind,
-                unit: kind.unit(),
-                days: summary.days,
-                value_min: summary.value_min,
-                value_max: summary.value_max,
-                overlap: overlaps.get(kind).map(OverlapAcc::finish),
-            })
-            .collect(),
-        sum_sources: resolved
-            .sum_sources
-            .iter()
-            .map(|(kind, s)| SumSourceReport {
-                kind: *kind,
-                days_multi_source: s.days_multi_source,
-                mean_ratio: s.mean_ratio,
-                worst_ratio: s.worst_ratio,
-            })
-            .collect(),
+        quarantined: quarantined_names(&stats),
+        unconvertible: unconvertible_units(&stats),
+        implausible: merge_refusals(&stats.implausible, &resolved.refused),
+        per_kind: per_kind_reports(&resolved, &overlaps),
+        sum_sources: sum_source_reports(&resolved),
         sleep_day_shift,
         stale_rows: summarize_stale(&stale),
         stale_rows_deleted,
         document_closed: stats.document_closed,
         replace_range_refused_truncated,
     })
+}
+
+fn quarantined_names(stats: &ImportStats) -> Vec<QuarantinedName> {
+    stats
+        .quarantined
+        .iter()
+        .map(|(raw_name, sample)| QuarantinedName {
+            raw_name: raw_name.clone(),
+            records_seen: sample.records_seen,
+        })
+        .collect()
+}
+
+fn unconvertible_units(stats: &ImportStats) -> Vec<UnconvertibleUnit> {
+    stats
+        .unconvertible
+        .iter()
+        .map(|((raw_name, unit), records)| UnconvertibleUnit {
+            raw_name: raw_name.clone(),
+            unit: unit.clone(),
+            records: *records,
+        })
+        .collect()
+}
+
+fn per_kind_reports(
+    resolved: &Resolved,
+    overlaps: &BTreeMap<MetricKind, OverlapAcc>,
+) -> Vec<KindReport> {
+    resolved
+        .per_kind
+        .iter()
+        .map(|(kind, summary)| KindReport {
+            kind: *kind,
+            unit: kind.unit(),
+            days: summary.days,
+            value_min: summary.value_min,
+            value_max: summary.value_max,
+            overlap: overlaps.get(kind).map(OverlapAcc::finish),
+        })
+        .collect()
+}
+
+fn sum_source_reports(resolved: &Resolved) -> Vec<SumSourceReport> {
+    resolved
+        .sum_sources
+        .iter()
+        .map(|(kind, s)| SumSourceReport {
+            kind: *kind,
+            days_multi_source: s.days_multi_source,
+            mean_ratio: s.mean_ratio,
+            worst_ratio: s.worst_ratio,
+        })
+        .collect()
+}
+
+/// Combine the two levels plausibility is enforced at — per record during the
+/// parse, per rollup after it — into one per-kind line for the report.
+fn merge_refusals(
+    records: &BTreeMap<MetricKind, RefusedTally>,
+    rows: &BTreeMap<MetricKind, RefusedTally>,
+) -> Vec<ImplausibleReport> {
+    let mut kinds: BTreeSet<MetricKind> = records.keys().copied().collect();
+    kinds.extend(rows.keys().copied());
+    kinds
+        .into_iter()
+        .map(|kind| {
+            let (a, b) = (records.get(&kind), rows.get(&kind));
+            ImplausibleReport {
+                kind,
+                unit: kind.unit(),
+                records: a.map_or(0, |t| t.records),
+                rows: b.map_or(0, |t| t.rows),
+                bounds_cleared: b.map_or(0, |t| t.bounds_cleared),
+                // The parse sees records first, so prefer its sample.
+                sample: a
+                    .and_then(|t| t.sample)
+                    .or_else(|| b.and_then(|t| t.sample)),
+            }
+        })
+        .collect()
 }
 
 /// Write one quarantine row per uncurated name seen this run.
@@ -577,11 +649,16 @@ async fn persist_quarantine<C: ConnectionTrait>(
 ) -> DomainResult<()> {
     for (raw_name, sample) in &stats.quarantined {
         let mut point = sample.point.clone();
-        if let Some(meta) = point
-            .get_mut("_import")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            meta.insert("records_seen".to_owned(), sample.records_seen.into());
+        // Created here rather than assumed to exist: `upsert_quarantine` stamps
+        // the reason into this same object and preserves what it finds, so
+        // whichever writes first, both keys survive.
+        if let Some(obj) = point.as_object_mut() {
+            let meta = obj
+                .entry(quarantined_metric::IMPORT_META_KEY)
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            if let Some(meta) = meta.as_object_mut() {
+                meta.insert("records_seen".to_owned(), sample.records_seen.into());
+            }
         }
         // `upsert_quarantine` keys on `(raw_name, date)`, and the retained date
         // is whichever record this run happened to see first. Importing a
@@ -589,7 +666,19 @@ async fn persist_quarantine<C: ConnectionTrait>(
         // *second* row for the same name, quietly breaking the one-row-per-name
         // invariant this path promises. Drop the other dates first.
         drop_other_dates(db, raw_name, sample.date).await?;
-        upsert_quarantine(db, raw_name, sample.date, &point, now).await?;
+        upsert_quarantine(
+            db,
+            raw_name,
+            sample.date,
+            &point,
+            QuarantineMeta {
+                reason: sample.reason,
+                units: sample.units.as_deref(),
+                kinds: &sample.kinds,
+            },
+            now,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -1435,17 +1524,34 @@ mod tests {
             .await
             .expect("seed quarantine");
         }
-        // HAE vocabulary: the backfill's sweep must never reach it.
-        quarantined_metric::ActiveModel {
-            raw_name: Set("some_future_hae_metric".to_owned()),
-            date: Set(date("2026-07-01")),
-            raw_point: Set(serde_json::json!({ "qty": 1.0 })),
-            created_at: Set(now),
-            ..Default::default()
+        // HAE vocabulary: the backfill's sweep must never reach it. Both shapes
+        // the live path writes are seeded, including a CURATED HAE name whose
+        // `HK` counterpart this build does recognize, quarantined over a value
+        // rather than over its name — nothing about "the name is now handled"
+        // is true of it.
+        //
+        // Both are stopped by the `HK` prefix scope before the reason is ever
+        // consulted, so this pins the OUTER guard rather than the inner one.
+        // That is the guard worth pinning: it is what the two-vocabulary
+        // arrangement rests on until healthie-1ru adds a real discriminator.
+        for (raw_name, reason) in [
+            ("some_future_hae_metric", "unknown-type"),
+            ("weight_body_mass", "implausible-value"),
+        ] {
+            quarantined_metric::ActiveModel {
+                raw_name: Set(raw_name.to_owned()),
+                date: Set(date("2026-07-01")),
+                raw_point: Set(serde_json::json!({
+                    "qty": 1.0,
+                    "_import": { "reason": reason },
+                })),
+                created_at: Set(now),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .expect("seed HAE quarantine");
         }
-        .insert(&db)
-        .await
-        .expect("seed HAE quarantine");
 
         let report = import(&db, FIXTURE).await;
         assert_eq!(report.stale_quarantine_cleared, 2);
@@ -1460,6 +1566,11 @@ mod tests {
         assert!(
             names.contains(&"some_future_hae_metric".to_owned()),
             "the HK-prefix scope must leave HAE rows alone"
+        );
+        assert!(
+            names.contains(&"weight_body_mass".to_owned()),
+            "a live-path row for a curated name must survive: the backfill promoting nothing has \
+             no bearing on a value this build refused"
         );
         assert!(names.contains(&"HKQuantityTypeIdentifierDietaryWater".to_owned()));
         assert!(

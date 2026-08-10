@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, FixedOffset, NaiveDate, Timelike};
 
-use crate::entities::daily_metric::MetricKind;
+use crate::{entities::daily_metric::MetricKind, services::plausibility};
 
 /// Local hour at which one "sleep day" ends and the next begins.
 ///
@@ -446,6 +446,45 @@ pub(crate) struct Resolved {
     pub(crate) rows: Vec<PendingRow>,
     pub(crate) per_kind: BTreeMap<MetricKind, KindSummary>,
     pub(crate) sum_sources: BTreeMap<MetricKind, SumSourceSummary>,
+    /// Rollups refused as physically impossible, per kind.
+    pub(crate) refused: BTreeMap<MetricKind, RefusedTally>,
+}
+
+/// What one kind's plausibility refusals amounted to.
+///
+/// Deliberately a tally with one sample rather than a list: on a decade of
+/// history the counts run to thousands and the operator needs the magnitude
+/// plus something recognizable to go look at, not every instance. The raw
+/// records are still in `export.xml` (ADR-0006 §7).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct RefusedTally {
+    /// Individual readings dropped before they reached the rollup. Excluding
+    /// them is what lets the day keep its *real* minimum rather than losing
+    /// the column outright.
+    pub(crate) records: u64,
+    /// Whole `(kind, date)` rollups refused — where sleep's impossible nights
+    /// land, since a night only exists after the interval union.
+    pub(crate) rows: usize,
+    /// Rollups that stored with a `min`/`max` dropped.
+    pub(crate) bounds_cleared: usize,
+    /// The first refused value seen, and its day.
+    pub(crate) sample: Option<(f64, NaiveDate)>,
+}
+
+impl RefusedTally {
+    /// Note one refusal against `kind`, keeping the first sample seen.
+    pub(crate) fn note(
+        tallies: &mut BTreeMap<MetricKind, Self>,
+        kind: MetricKind,
+        value: f64,
+        date: NaiveDate,
+    ) -> &mut Self {
+        let tally = tallies.entry(kind).or_default();
+        if tally.sample.is_none() {
+            tally.sample = Some((value, date));
+        }
+        tally
+    }
 }
 
 impl Accumulator {
@@ -523,17 +562,21 @@ impl Accumulator {
     pub(crate) fn resolve(&self) -> Resolved {
         let mut rows = Vec::with_capacity(self.quantities.len());
         let mut ratios: BTreeMap<MetricKind, Vec<f64>> = BTreeMap::new();
+        let mut refused: BTreeMap<MetricKind, RefusedTally> = BTreeMap::new();
 
         for ((kind, date), acc) in &self.quantities {
             let (value, min, max) = acc.resolve();
-            rows.push(PendingRow {
-                kind: *kind,
-                date: *date,
+            if let Some(row) = admissible_row(
+                *kind,
+                *date,
                 value,
                 min,
                 max,
-                source: acc.resolve_source(),
-            });
+                acc.resolve_source(),
+                &mut refused,
+            ) {
+                rows.push(row);
+            }
             if let Some(by_source) = &acc.by_source
                 && by_source.len() > 1
             {
@@ -547,32 +590,99 @@ impl Accumulator {
         for (date, night) in &self.sleep {
             for (stage, acc) in &night.stages {
                 if !acc.set.is_empty() {
-                    rows.push(sleep_row(
+                    push_sleep(
+                        &mut rows,
                         *stage,
                         *date,
                         acc.set.hours(),
                         acc.source.clone(),
-                    ));
+                        &mut refused,
+                    );
                 }
             }
             if !night.asleep.set.is_empty() {
-                rows.push(sleep_row(
+                push_sleep(
+                    &mut rows,
                     MetricKind::SleepTotal,
                     *date,
                     night.asleep.set.hours(),
                     night.asleep.source.clone(),
-                ));
+                    &mut refused,
+                );
             }
         }
 
         rows.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.date.cmp(&b.date)));
+        // Summarized from the SURVIVING rows, so the value-span report — the
+        // tripwire for a scale mistake — describes what was actually written.
         let per_kind = summarize(&rows);
         Resolved {
             rows,
             per_kind,
             sum_sources: summarize_sources(&ratios),
+            refused,
         }
     }
+}
+
+/// One rollup, if it is a measurement at all.
+///
+/// The same rule the live path applies: a `value` outside what the kind can
+/// physically be costs the row, while an impossible `min`/`max` costs only that
+/// column — the row's own figure is independently sound.
+fn admissible_row(
+    kind: MetricKind,
+    date: NaiveDate,
+    value: f64,
+    min: Option<f64>,
+    max: Option<f64>,
+    source: Option<String>,
+    refused: &mut BTreeMap<MetricKind, RefusedTally>,
+) -> Option<PendingRow> {
+    if plausibility::reject_reason(kind, value).is_some() {
+        RefusedTally::note(refused, kind, value, date).rows += 1;
+        return None;
+    }
+    let mut cleared = false;
+    let mut bound = |raw: Option<f64>| match raw {
+        Some(raw) if plausibility::reject_reason(kind, raw).is_some() => {
+            RefusedTally::note(refused, kind, raw, date);
+            cleared = true;
+            None
+        }
+        other => other,
+    };
+    let (min, max) = (bound(min), bound(max));
+    if cleared {
+        refused.entry(kind).or_default().bounds_cleared += 1;
+    }
+    Some(PendingRow {
+        kind,
+        date,
+        value,
+        min,
+        max,
+        source,
+    })
+}
+
+/// A sleep stage row, unless the night it describes is not a night.
+///
+/// This is where a 49.9-hour "night" is caught: sleep has no per-record value
+/// to check, because the total only exists after the interval union.
+fn push_sleep(
+    rows: &mut Vec<PendingRow>,
+    kind: MetricKind,
+    date: NaiveDate,
+    hours: f64,
+    source: Option<String>,
+    refused: &mut BTreeMap<MetricKind, RefusedTally>,
+) {
+    if plausibility::reject_reason(kind, hours).is_some() {
+        RefusedTally::note(refused, kind, hours, date).rows += 1;
+        return;
+    }
+    rows.push(sleep_row(kind, date, hours, source));
 }
 
 /// Whether a reading at `ts` from `source` should take over the credited source
@@ -931,19 +1041,23 @@ mod tests {
     #[test]
     fn mean_and_max_policies_leave_spread_null() {
         let mut acc = Accumulator::default();
-        for v in [40.0, 50.0] {
+        // Values are per kind rather than shared: 45 mi/hr is not a walking
+        // speed, and now that rollups are bounded, a fixture cannot borrow
+        // another metric's magnitude just because the policy under test does
+        // not care about the number.
+        for (vo2, speed) in [(40.0, 2.0), (50.0, 3.0)] {
             acc.fold_quantity(
                 MetricKind::Vo2Max,
                 DailyAgg::Max,
                 ts("2026-07-28 08:00:00 -0700"),
-                v,
+                vo2,
                 None,
             );
             acc.fold_quantity(
                 MetricKind::WalkingSpeed,
                 DailyAgg::Mean,
                 ts("2026-07-28 08:00:00 -0700"),
-                v,
+                speed,
                 None,
             );
         }
@@ -951,7 +1065,7 @@ mod tests {
         let vo2 = row_for(&rows, MetricKind::Vo2Max);
         assert!(close(vo2.value, 50.0) && vo2.min.is_none() && vo2.max.is_none());
         let speed = row_for(&rows, MetricKind::WalkingSpeed);
-        assert!(close(speed.value, 45.0) && speed.min.is_none());
+        assert!(close(speed.value, 2.5) && speed.min.is_none());
     }
 
     /// Readings land on the local calendar day of their own offset — a

@@ -121,6 +121,7 @@ pub fn render(report: &ImportReport, path: &Path) -> String {
 
     render_quarantine(&mut out, report);
     render_unconvertible(&mut out, report);
+    render_implausible(&mut out, report);
     render_kinds(&mut out, report);
     render_sum_sources(&mut out, report);
     render_sleep_shift(&mut out, report);
@@ -227,6 +228,42 @@ fn render_unconvertible(out: &mut String, report: &ImportReport) {
             "    {:<48} unit={:<8} {:>7}",
             u.raw_name, u.unit, u.records
         );
+    }
+}
+
+/// Readings refused as not being measurements at all.
+///
+/// Deliberately verbose about what happened to each: dropping a *record* keeps
+/// the day and its real minimum, dropping a *row* means the day has no figure
+/// at all, and the two are not interchangeable when reading a trend later.
+fn render_implausible(out: &mut String, report: &ImportReport) {
+    if report.implausible.is_empty() {
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "\n  implausible values  {} kinds (NOT stored — outside what the metric can physically be)",
+        report.implausible.len()
+    );
+    for i in &report.implausible {
+        let _ = write!(
+            out,
+            "    {:<24} {:>7} readings {:>5} days {:>5} bounds cleared",
+            format!("{:?}", i.kind),
+            i.records,
+            i.rows,
+            i.bounds_cleared
+        );
+        if let Some((value, date)) = i.sample {
+            let _ = write!(out, "   e.g. {value:.3} {} on {date}", i.unit);
+        }
+        out.push('\n');
+    }
+    for line in [
+        "     ℹ  The raw records are still in export.xml, so widening a bound in",
+        "        services/plausibility.rs and re-running recovers every one of these.",
+    ] {
+        let _ = writeln!(out, "{line}");
     }
 }
 
@@ -382,8 +419,8 @@ mod tests {
     use healthie_shared::{
         entities::daily_metric::MetricKind,
         services::apple_health::{
-            ExistingData, ImportReport, KindReport, Overlap, QuarantinedName, SleepDayShift,
-            StaleRows, SumSourceReport, UnconvertibleUnit,
+            ExistingData, ImplausibleReport, ImportReport, KindReport, Overlap, QuarantinedName,
+            SleepDayShift, StaleRows, SumSourceReport, UnconvertibleUnit,
         },
         test_support::date,
     };
@@ -396,6 +433,7 @@ mod tests {
             records_curated: 90,
             records_excluded: 5,
             records_skipped: 5,
+            implausible: Vec::new(),
             rows_written: 12,
             rows_overwritten: 0,
             stale_quarantine_cleared: 0,
@@ -771,5 +809,39 @@ mod tests {
         assert!(out.contains("mmHg"), "{out}");
         assert!(out.contains("LOWER BOUND"), "{out}");
         assert!(out.contains("1.98x"), "{out}");
+    }
+
+    /// Refusing readings silently would be the same trap as any other silent
+    /// drop: the operator has to be able to see what a bound cost, and which
+    /// of the two levels it was refused at.
+    #[test]
+    fn implausible_values_are_reported_with_a_sample_and_a_remedy() {
+        let mut report = base();
+        report.implausible = vec![
+            ImplausibleReport {
+                kind: MetricKind::Spo2,
+                unit: "%",
+                records: 23,
+                rows: 0,
+                bounds_cleared: 2,
+                sample: Some((0.0, date("2019-03-02"))),
+            },
+            ImplausibleReport {
+                kind: MetricKind::SleepTotal,
+                unit: "hr",
+                records: 0,
+                rows: 1,
+                bounds_cleared: 0,
+                sample: Some((49.877, date("2023-12-29"))),
+            },
+        ];
+        let out = render(&report, Path::new("export.xml"));
+        assert!(out.contains("implausible values"), "{out}");
+        assert!(out.contains("Spo2"), "{out}");
+        assert!(out.contains("49.877 hr on 2023-12-29"), "{out}");
+        assert!(
+            out.contains("re-running recovers"),
+            "a refusal must come with its remedy: {out}"
+        );
     }
 }

@@ -62,12 +62,42 @@ pub async fn hae(
     Json(payload): Json<metrics::HaePayload>,
 ) -> Result<StatusCode, ApiError> {
     let report = metrics::ingest_hae(&state.db, payload).await?;
-    tracing::info!(
-        ingested = report.ingested,
-        quarantined = ?report.quarantined,
-        range = ?report.date_range,
-        "hae ingest",
-    );
+    // A push that refused something is the one an operator needs to see. This
+    // runs unattended every day, so an `info!` line indistinguishable from the
+    // 364 ordinary ones would not be read — and a metric refused on EVERY push
+    // means the live feed changed shape and rows that used to land are now
+    // being held instead. That is the signal `warn` exists for.
+    // An unknown NAME belongs here too: ADR-0005 §4 calls quarantine the
+    // discovery surface, and HAE shipping a metric this build has never seen is
+    // exactly the "the feed changed shape" signal, whether the change refuses
+    // something or merely adds something.
+    let quiet = report.refused.is_empty()
+        && report.bounds_cleared == 0
+        && report.quarantined.is_empty()
+        && report.skipped == 0;
+    if quiet {
+        tracing::info!(
+            ingested = report.ingested,
+            quarantined = ?report.quarantined,
+            range = ?report.date_range,
+            quarantine_retired = report.quarantine_retired,
+            "hae ingest",
+        );
+    } else {
+        tracing::warn!(
+            ingested = report.ingested,
+            quarantined = ?report.quarantined,
+            range = ?report.date_range,
+            bounds_cleared = report.bounds_cleared,
+            quarantine_retired = report.quarantine_retired,
+            skipped = report.skipped,
+            refused = ?report.refused,
+            // Deliberately not "refused points": a cleared bound still stores
+            // its row, and `Refusal::stored` says which happened. Claiming
+            // nothing landed would be worse than saying less.
+            "hae ingest did not store everything it was sent — see refused/quarantined/skipped",
+        );
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
