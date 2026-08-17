@@ -57,6 +57,9 @@ jobs:
           filters: |
             code:
               - 'healthie-shared/**'
+              - 'healthie-mcp/**'
+              - 'healthie-backend/**'
+              - 'deploy/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rustfmt.toml'
@@ -133,6 +136,69 @@ jobs:
       - name: Cross cargo check (aarch64-unknown-linux-gnu)
         run: cargo check --workspace --locked --target aarch64-unknown-linux-gnu
 
+  # Have systemd itself parse the unit file. Nothing else anywhere does — the
+  # deploy just base64s it onto the box — so a typo'd directive, an invalid
+  # RestrictAddressFamilies token, or a setting placed in the wrong section
+  # would reach the box unread. Those fail quietly — systemd ignores what it
+  # does not recognize — and the symptom is a service that starts without the
+  # protection you thought you configured.
+  unit-file:
+    name: systemd unit parses
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: systemd-analyze verify
+        # The verdict comes from the FILTERED output, not the exit code:
+        # `systemd-analyze verify` exits non-zero on a runner for reasons that
+        # are expected and permanent here — the healthie user does not exist and
+        # neither does /opt/healthie/healthie-backend. Keying on the exit code
+        # would make this job either permanently red or permanently meaningless.
+        # The raw output is always printed so nobody debugs a failure blind.
+        run: |
+          systemd-analyze verify deploy/healthie.service > verify.txt 2>&1 || true
+          echo "--- systemd-analyze verify output ---"
+          cat verify.txt
+          echo "--- unexpected findings ---"
+          # Two things this filter must NOT do. It must not let a blank line
+          # through: `[ -s ]` would then see a non-empty file and emit an
+          # ::error:: with nothing printed above it. And it must not drop every
+          # "No such file or directory" — that phrase also reports a genuinely
+          # bad path, such as a typo'd ReadWritePaths=, which is exactly what
+          # this job exists to catch. So the two paths that are legitimately
+          # absent on a runner are named explicitly instead.
+          grep -Ev \
+            -e '^[[:space:]]*$' \
+            -e 'Unknown user|Unknown group|Failed to resolve (user|group)' \
+            -e '/opt/healthie/healthie-backend.*(No such file or directory|not executable)' \
+            -e '/opt/healthie/\.env.*No such file or directory' \
+            verify.txt > unexpected.txt || true
+          if [ -s unexpected.txt ]; then
+            cat unexpected.txt
+            echo "::error::systemd-analyze verify reported findings beyond the expected missing-user/missing-binary warnings."
+            exit 1
+          fi
+          echo "(none)"
+
+  # `just verify-build-sha` is the only check that would notice build.rs
+  # regressing to always-"unknown" — every test would still pass, and the first
+  # symptom would be a deploy failing its own identity gate. It needs nothing but
+  # git and cargo, and it operates entirely inside a temp dir.
+  build-sha:
+    name: embedded build sha tracks HEAD
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-sha
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just verify-build-sha
+
   # Single required status for branch protection. `if: always()` so it runs
   # even when a dependency was deliberately skipped. It FAILS if any
   # dependency ended in `failure` or `cancelled`, and TREATS `skipped` AS
@@ -142,7 +208,7 @@ jobs:
   # rename/condition without touching the protection rule.
   all-checks:
     name: all-checks
-    needs: [changes, format, backend, typos, aarch64-cross-check]
+    needs: [changes, format, backend, typos, aarch64-cross-check, unit-file, build-sha]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

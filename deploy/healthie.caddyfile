@@ -1,0 +1,24 @@
+# healthie's block for the shared reverse proxy on the box.
+#
+# NOTHING IN THIS REPO APPLIES THIS FILE. /etc/caddy/Caddyfile is owned outright
+# by the home-proxy repo, whose deploy installs its own copy wholesale and
+# publishes an mDNS alias for every `http://<name>.local` it declares. Two
+# repositories writing that file would mean each one silently reverting the
+# other, so healthie's deploy does not touch Caddy at all — it only warns when
+# healthie.local does not reach it.
+#
+# To route healthie: paste this block into home-proxy/deploy/Caddyfile, commit
+# it there, and run that repo's deploy. The mDNS alias comes along with it.
+#
+# The `http://` prefix is load-bearing: it pins the site to port 80 and disables
+# automatic HTTPS, which no public CA will issue for a `.local` name.
+#
+# 3005 is healthie-backend's default listen port and is registered to healthie
+# on this box (3000 fewd, 3001 chorez, 3002 kammerz).
+#
+# Validated against the box's own caddy 2.6.2, both standalone and composed into
+# home-proxy's Caddyfile.
+
+http://healthie.local {
+	reverse_proxy localhost:3005
+}

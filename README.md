@@ -43,9 +43,33 @@ never logged. Point the Health Auto Export automation's REST target at
 `http(s)://<host>:3005/ingest/hae` with the ingest token. `GET /api/health`
 needs no token.
 
+## Deployment
+
+healthie runs as a systemd service on the household ODroid N2+ (DietPi,
+aarch64). One-time per box, then once per release:
+
+```bash
+cp deploy/.env.example deploy/.env
+just bootstrap dietpi@dietpi.home     # user, dirs, .env, unit — does not start it
+just deploy    dietpi@dietpi.home     # snapshot, upload, atomic swap, health gate
+just token     dietpi@dietpi.home ingest   # bearer tokens; printed ONCE
+```
+
+`deploy` refuses a dirty tree and waits for `/api/health` to report the exact
+commit it just built — a healthy answer from the previous binary does not pass.
+`just rollback <host>` restores it; `just status` / `just logs` inspect it.
+
+The `http://healthie.local` name is configured in the separate `home-proxy`
+repo (paste `deploy/healthie.caddyfile` there); healthie's deploy warns until
+that is done but does not depend on it.
+
+Full runbook: [`docs/operations.md`](docs/operations.md). Rationale:
+[ADR-0008](docs/adr/0008-deploy-posture.md).
+
 ## Project docs
 
 - `docs/adr/` — architecture decision records (the durable "why")
+- `docs/operations.md` — deployment and on-box runbook
 - `CLAUDE.md` — agent conventions and build/test commands
 
 ## Status
