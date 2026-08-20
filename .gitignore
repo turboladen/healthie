@@ -23,3 +23,8 @@ target/
 
 # Local MCP server config — holds a personal LAN bearer token; never commit
 .mcp.json
+
+# Filled-in copy of deploy/.env.example, installed to the box as
+# /opt/healthie/.env. Carries no secret today, but it is per-machine
+# configuration and the template is what belongs in git.
+/deploy/.env

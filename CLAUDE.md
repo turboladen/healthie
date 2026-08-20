@@ -57,7 +57,13 @@ just ci        # full gate: fmt-check + ci-backend (build + test + clippy, works
 just fmt       # dprint fmt + cargo +nightly fmt (nightly required for rustfmt.toml options)
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings -D clippy::pedantic  # hard gate
+just verify-build-sha  # proves build.rs's GIT_COMMIT tracks HEAD (not in `just ci` — several full builds; runs in CI)
 ```
+
+Deploy (ODroid N2+, DietPi/aarch64; see `docs/operations.md` and ADR-0008):
+`just bootstrap|deploy|token|rollback|status|logs <user@host>`. `deploy` refuses
+a dirty tree and gates on `/api/health` reporting the exact commit built.
+healthie does NOT configure the shared Caddyfile — that lives in `home-proxy`.
 
 ## Architecture Overview
 
@@ -97,6 +103,13 @@ copied from `../glovebox` except where an ADR says otherwise.
   connection (healthie-mcp main.rs) and in `test_db()` (healthie-38x); services
   still self-enforce referential integrity via `require()` as the backstop for
   actionable errors — keep doing so
+- Comments are for what the code CAN'T say: a non-obvious constraint, a rejected
+  alternative, a footgun. Not narration, not restating the code, not teaching the
+  language. Rule of thumb — **a comment longer than the code it describes is
+  almost always wrong**; if a 7-line function needs 17 lines of explanation,
+  either the code should be clearer or most of that belongs in an ADR. The
+  audience already knows Rust, systemd and shell, and does not need to be sold on
+  the decision a second time
 - Rustdoc-visible comments (`///`, `//!`) must stand alone for a reader with no
   repo and no tracker — they render on docs.rs. NEVER put a bead ID, `ADR-NNNN`,
   or PR number in one: a bare `ADR-0005 §4` in published docs reads as an author

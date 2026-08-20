@@ -1,6 +1,11 @@
 //! `GET /api/health`. Liveness with a real `SELECT 1` (a wedged data dir must
-//! not read healthy) plus the build version. The git-SHA identity is added by
-//! healthie-93n.
+//! not read healthy), the crate version, and `build` — the git commit this
+//! binary was built from, embedded by the build script.
+//!
+//! `build` exists for the deploy gate: a service that answers is not evidence
+//! that the *new* binary is the one answering. Comparing the field against the
+//! commit being deployed is what distinguishes a successful swap from a stop
+//! that silently failed and left the old process serving.
 
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use sea_orm::{ConnectionTrait, Statement};
@@ -17,7 +22,11 @@ pub async fn check(State(state): State<AppState>) -> impl IntoResponse {
     {
         Ok(_) => (
             StatusCode::OK,
-            Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") })),
+            Json(json!({
+                "ok": true,
+                "version": env!("CARGO_PKG_VERSION"),
+                "build": env!("GIT_COMMIT"),
+            })),
         )
             .into_response(),
         Err(err) => {

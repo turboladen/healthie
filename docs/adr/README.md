@@ -56,3 +56,4 @@ it's an ADR.
 | [0005](0005-metrics-ingest-and-backend.md)      | Accepted | Metrics ingest + one-binary backend; kinded auth tokens       |
 | [0006](0006-apple-health-backfill.md)           | Accepted | Apple Health `export.xml` backfill: reconstructing the rollup |
 | [0007](0007-live-path-intake-hardening.md)      | Accepted | Live-path hardening: refuse don't coerce, bound don't clamp   |
+| [0008](0008-deploy-posture.md)                  | Accepted | Deploy: atomic swap, proven build identity, proxy left alone  |

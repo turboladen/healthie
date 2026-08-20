@@ -1,0 +1,83 @@
+[Unit]
+Description=healthie — personal health system-of-record
+After=network.target
+# Crash-loop cap. Lives in [Unit], not [Service] — systemd moved it here in
+# v229 and silently ignores it in the wrong section. With RestartSec=5 that is
+# ~5 quick restarts then a clean stop: rides out a transient blip, but a
+# bad-migration panic on boot gives up instead of looping forever.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=healthie
+Group=healthie
+WorkingDirectory=/opt/healthie
+ExecStart=/opt/healthie/healthie-backend serve
+EnvironmentFile=/opt/healthie/.env
+
+# These two live here rather than in .env so a redeploy can change them: the
+# unit is re-pushed on every deploy, /opt/healthie/.env is written once at
+# bootstrap and never overwritten.
+#
+# BUT a key set in .env WINS over this block. systemd.exec is explicit —
+# "Settings from these files override settings made with Environment=" —
+# unconditionally, regardless of the order the directives appear in. So a key
+# uncommented in .env can never afterwards be changed by pushing a new unit;
+# it can only be fixed by hand-editing /opt/healthie/.env on the box. That is
+# why deploy/.env.example keeps both of these commented out.
+#
+# RUST_LOG: the binary already defaults to info (it falls back to "info" when
+# RUST_LOG is unset), so this is for fleet consistency and visibility, not to
+# rescue the log level.
+Environment="RUST_LOG=info"
+# Without this, rmcp's Host allowlist accepts only localhost/127.0.0.1/::1 and
+# rejects every /mcp request arriving under any other Host header — reaching
+# healthie as healthie.local, dietpi.home:3005 or by raw IP would all 403 while
+# the service otherwise looks perfectly healthy. An entry without a port matches
+# any port, and these are appended to rmcp's own defaults rather than replacing
+# them.
+#
+# The box also has eth0.30 at 192.168.30.4, and it is deliberately NOT listed.
+# That VLAN is a segmentation boundary someone drew on purpose, and healthie
+# serves health data over plain HTTP with cleartext bearer tokens, so widening
+# the MCP surface across it is a decision to take on its own merits rather than
+# by default. The consequence is asymmetric and worth knowing before debugging
+# it: from 192.168.30.4, /api/health and /ingest/hae work normally while /mcp
+# alone returns 403. That is this allowlist doing its job. See
+# docs/operations.md.
+Environment="HEALTHIE_MCP_ALLOWED_HOSTS=healthie.local,dietpi.home,dietpi.local,192.168.10.4"
+
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Sandboxing. The service reads its binary and .env, writes only the SQLite
+# database (plus its -wal/-shm and the pre-deploy snapshots), and speaks TCP.
+# ReadWritePaths lifts systemd's namespace restriction only — ordinary file
+# permissions still apply, so /opt/healthie/data must also be owned by the
+# healthie user (bootstrap does that).
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/healthie/data
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+# AF_NETLINK is deliberately absent, and this is contingent: glibc's __check_pf
+# opens a netlink socket when resolving names for an outbound connection, so the
+# first HTTP client added to this binary will need it. The symptom is a DNS
+# failure, not a sandbox error, which makes it easy to misdiagnose — remove this
+# line first when debugging a service that starts but cannot reach anything.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RemoveIPC=true
+
+[Install]
+WantedBy=multi-user.target

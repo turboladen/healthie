@@ -62,6 +62,37 @@ async fn health_reports_ok_and_version() {
     assert!(json["version"].is_string(), "version must be a string");
 }
 
+/// The deploy gate matches `"build":"<sha>"` in this body to decide whether the
+/// binary it uploaded is the one answering. If the field ever stops being a
+/// plain non-empty string carrying the embedded commit, every deploy fails —
+/// or worse, passes while the old binary serves.
+#[tokio::test]
+async fn health_names_the_build_it_is_running() {
+    let resp = app()
+        .await
+        .oneshot(
+            Request::builder()
+                .uri("/api/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+
+    let build = json["build"].as_str().expect("build must be a string");
+    assert!(!build.is_empty(), "build must never be empty");
+    assert_eq!(
+        build,
+        env!("GIT_COMMIT"),
+        "the served build must be the one the build script embedded"
+    );
+}
+
 #[tokio::test]
 async fn ingest_requires_bearer_and_returns_204() {
     use sea_orm::EntityTrait;
